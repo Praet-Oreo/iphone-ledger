@@ -4,6 +4,12 @@
 <meta charset="UTF-8" />
 <title>Ledger — Personal Finance</title>
 <meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="theme-color" content="#0F1913" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black" />
+<meta name="apple-mobile-web-app-title" content="Ledger" />
+<link rel="apple-touch-icon" href="apple-touch-icon.png" />
 <style>
   html, body { margin: 0; padding: 0; background: #0F1913; }
   #root { min-height: 100vh; }
@@ -11,6 +17,19 @@
   body, input, select, textarea, button { font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif; }
   ::-webkit-scrollbar { width: 8px; height: 8px; }
   ::-webkit-scrollbar-thumb { background: #2A3A2F; border-radius: 4px; }
+  /* Shift & Season Planner */
+  .pl-cal { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 3px; }
+  .pl-day { min-height: 78px; }
+  .pl-grid2 { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr); gap: 16px; }
+  @media (max-width: 760px) {
+    .pl-grid2 { grid-template-columns: minmax(0, 1fr); }
+    .pl-day { min-height: 50px; }
+    .pl-chip-text { display: none; }
+    .pl-chip { min-height: 5px; padding: 0 !important; }
+    .ldg-root { padding: 16px 12px 60px !important; }
+    /* iOS zooms the page into any field under 16px — keep typing from jolting the layout */
+    input, select, textarea { font-size: 16px !important; }
+  }
 </style>
 </head>
 <body>
@@ -383,7 +402,11 @@ let CATEGORY_LIB = [{
   color: "#93A395"
 }];
 const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
-const todayISO = () => new Date().toISOString().slice(0, 10);
+/* Local calendar date. toISOString() is UTC, which in US evenings already reads
+   as tomorrow — that made "today" defaults and the current budget month flip
+   early (after 7pm Central). Everything date-only should go through these. */
+const localISO = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+const todayISO = () => localISO();
 const fmtMoney = n => {
   const v = Number(n) || 0;
   const s = v < 0 ? "-" : "";
@@ -408,7 +431,7 @@ const hostFromUrl = url => {
 const advanceDate = (dateStr, frequency) => {
   const d = new Date(dateStr + "T00:00:00");
   if (frequency === "weekly") d.setDate(d.getDate() + 7);else if (frequency === "yearly") d.setFullYear(d.getFullYear() + 1);else d.setMonth(d.getMonth() + 1);
-  return d.toISOString().slice(0, 10);
+  return localISO(d);
 };
 const monthKey = d => (d || "").slice(0, 7);
 const monthLabel = k => {
@@ -730,6 +753,7 @@ const idbDel = async key => {
    Kept in one bag so adding another toggle later doesn't mean another key. */
 const VIEW_PREFS_KEY = "ledger_view_prefs_v1";
 const DEFAULT_VIEW_PREFS = {
+  tab: "ledger",
   showHistory: true,
   historyRange: "3m",
   hiddenSeries: {}
@@ -3641,6 +3665,52 @@ function ProjectedIncomeRow({
 }) {
   const [showWithholding, setShowWithholding] = useState((Number(item.withholdingRate) || 0) > 0);
   const days = daysUntil(item.expectedDate);
+  if (item.fromPlanner) return /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 10,
+      background: COLORS.bg,
+      border: `1px solid ${COLORS.line}`,
+      borderRadius: 8,
+      padding: "9px 12px"
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      width: 4,
+      alignSelf: "stretch",
+      borderRadius: 2,
+      background: item.color || COLORS.gold
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minWidth: 0
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13,
+      color: COLORS.text
+    }
+  }, item.source), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 11.5,
+      color: days !== null && days < 0 ? COLORS.gold : COLORS.textDim
+    }
+  }, item.expectedDate, days !== null ? ` · ${days < 0 ? "should have arrived" : days === 0 ? "today" : `in ${days}d`}` : "", " · from the Planner — edit its shifts there", Number(item.withholdingRate) ? ` · ${item.withholdingRate}% withheld` : "")), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontFamily: "'JetBrains Mono', monospace",
+      fontSize: 13,
+      color: COLORS.sage,
+      fontWeight: 600
+    }
+  }, fmtMoney(item.estAmount)), /*#__PURE__*/React.createElement(GhostButton, {
+    onClick: () => onMarkReceived(item),
+    style: {
+      padding: "4px 9px",
+      fontSize: 11.5
+    }
+  }, "Received"));
   const recalc = (grossOverride, rateOverride) => afterWithholding(grossOverride !== undefined ? grossOverride : item.gross ?? item.estAmount, rateOverride !== undefined ? rateOverride : item.withholdingRate ?? 0);
   return /*#__PURE__*/React.createElement("div", {
     style: {
@@ -4740,6 +4810,3861 @@ function NetWorthChart({
   }, "Total balance across all accounts, end of each month"));
 }
 
+/* ================= SHIFT & SEASON PLANNER — engine =================
+   Pure functions only: no React, no storage. Everything here turns job
+   profiles + shifts into paychecks and projections, so it can be reasoned
+   about (and tested) without the UI.
+
+   Core idea (from the planner spec): seasonal income arrives in lumps while
+   spending is spread across the year — a reservoir behind a dam. Shifts are
+   the rain; paychecks are when it actually reaches the reservoir. Everything
+   projects off the PAY date, never the shift date, because pay lag moves July
+   work into August money.
+
+   Dates are handled as "YYYY-MM-DD" strings converted to integer day numbers
+   via Date.UTC, which keeps day arithmetic immune to DST and timezone drift. */
+const PLANNER_KEY = "ledger_planner_v1";
+const DEFAULT_PLANNER_SETTINGS = {
+  baselineMonthly: null,
+  // null = derive from recent actual spending
+  bufferMin: 0,
+  // cushion the reservoir should never drop below
+  gapDays: 21 // income gaps at least this long get a buffer check
+};
+const DEFAULT_PLANNER = {
+  jobs: [],
+  shifts: [],
+  payRecords: [],
+  settings: DEFAULT_PLANNER_SETTINGS
+};
+const normalizePlanner = p => ({
+  jobs: Array.isArray(p && p.jobs) ? p.jobs : [],
+  shifts: Array.isArray(p && p.shifts) ? p.shifts : [],
+  payRecords: Array.isArray(p && p.payRecords) ? p.payRecords : [],
+  settings: {
+    ...DEFAULT_PLANNER_SETTINGS,
+    ...(p && p.settings || {})
+  }
+});
+const loadPlanner = () => {
+  try {
+    const r = localStorage.getItem(PLANNER_KEY);
+    return normalizePlanner(r ? JSON.parse(r) : null);
+  } catch {
+    return normalizePlanner(null);
+  }
+};
+const savePlanner = obj => {
+  try {
+    localStorage.setItem(PLANNER_KEY, JSON.stringify(obj));
+  } catch (e) {
+    console.error("save failed", e);
+  }
+};
+
+/* ---- date math on ISO strings ---- */
+const plPad = n => String(n).padStart(2, "0");
+const plDayNum = s => {
+  const [y, m, d] = String(s).split("-").map(Number);
+  return Math.round(Date.UTC(y, m - 1, d) / 86400000);
+};
+const plFromDayNum = n => {
+  const dt = new Date(n * 86400000);
+  return `${dt.getUTCFullYear()}-${plPad(dt.getUTCMonth() + 1)}-${plPad(dt.getUTCDate())}`;
+};
+const plAddDays = (s, n) => plFromDayNum(plDayNum(s) + n);
+const plDiff = (a, b) => plDayNum(b) - plDayNum(a);
+const plWeekday = s => ((plDayNum(s) + 4) % 7 + 7) % 7; // 0 = Sunday (1970-01-01 was a Thursday)
+const plWeekStart = s => plAddDays(s, -((plWeekday(s) + 6) % 7)); // Monday-based weeks
+const plMonthEnd = s => {
+  const [y, m] = s.split("-").map(Number);
+  return `${y}-${plPad(m)}-${plPad(new Date(Date.UTC(y, m, 0)).getUTCDate())}`;
+};
+const plMinutes = t => {
+  if (!t || !/^\d{1,2}:\d{2}$/.test(t)) return null;
+  const [h, m] = t.split(":").map(Number);
+  return h * 60 + m;
+};
+const plIsValidDate = s => typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s);
+/* The Saturday on or after a date — the default pay-period end for new jobs. */
+const plNextSaturday = s => plAddDays(s, (6 - plWeekday(s) + 7) % 7);
+const plFmtRange = (a, b) => {
+  const f = s => {
+    const [, m, d] = s.split("-").map(Number);
+    return `${m}/${d}`;
+  };
+  return a === b ? f(a) : `${f(a)}–${f(b)}`;
+};
+
+/* ---- shifts ---- */
+const shiftLastDay = s => plIsValidDate(s.endDate) && s.endDate > s.date ? s.endDate : s.date;
+const shiftDays = s => {
+  const n = Math.min(400, Math.max(0, plDiff(s.date, shiftLastDay(s))));
+  const out = [];
+  for (let i = 0; i <= n; i++) out.push(plAddDays(s.date, i));
+  return out;
+};
+/* Hours per day: an explicit override wins, otherwise the start/end times
+   (an end earlier than the start is an overnight shift). */
+const shiftHoursPerDay = s => {
+  if (s.hours !== undefined && s.hours !== null && s.hours !== "" && !isNaN(Number(s.hours))) return Math.max(0, Number(s.hours));
+  const a = plMinutes(s.start),
+    b = plMinutes(s.end);
+  if (a === null || b === null) return 0;
+  let mins = b - a;
+  if (mins <= 0) mins += 1440;
+  return mins / 60;
+};
+const PAY_TYPE_LABEL = {
+  hourly: "Hourly",
+  flat: "Flat / stipend",
+  hybrid: "Hourly + per-shift extra"
+};
+const FLAT_UNIT_LABEL = {
+  shift: "per shift / visit",
+  day: "per day",
+  week: "per week",
+  session: "per session or season"
+};
+const SCHEDULE_LABEL = {
+  perShift: "Each shift",
+  weekly: "Weekly",
+  biweekly: "Every 2 weeks",
+  semimonthly: "Twice a month (1st–15th, 16th–end)",
+  monthly: "Monthly",
+  endOfSeason: "End of season"
+};
+
+/* What a shift earns, spread across the days it covers. Spreading matters: a
+   two-week camp session paid weekly must land half in each paycheck. Returns
+   [{date, amount}] in gross dollars. */
+const shiftAccruals = (s, job) => {
+  if (!job) return [];
+  const days = shiftDays(s);
+  if (!days.length) return [];
+  const rate = Number(job.rate) || 0;
+  const flat = Number(job.flatAmount) || 0;
+  const perDay = {};
+  days.forEach(d => {
+    perDay[d] = 0;
+  });
+  const override = s.amountOverride !== undefined && s.amountOverride !== null && s.amountOverride !== "" && !isNaN(Number(s.amountOverride));
+  if (override) {
+    const each = Number(s.amountOverride) / days.length;
+    days.forEach(d => {
+      perDay[d] += each;
+    });
+  } else if (job.payType === "hourly" || job.payType === "hybrid") {
+    const hrs = shiftHoursPerDay(s);
+    days.forEach(d => {
+      perDay[d] += hrs * rate + (job.payType === "hybrid" && !s.noPerShiftAmount ? flat : 0);
+    });
+  } else {
+    const unit = job.flatUnit || "shift";
+    if (unit === "day") days.forEach(d => {
+      perDay[d] += flat;
+    });else if (unit === "week") {
+      /* Count calendar weeks touched, so a Mon–Fri camp week is one week of
+         pay rather than 5/7 of one. Each week's pay spreads over its days. */
+      const byWeek = {};
+      days.forEach(d => {
+        const w = plWeekStart(d);
+        (byWeek[w] = byWeek[w] || []).push(d);
+      });
+      Object.values(byWeek).forEach(ds => ds.forEach(d => {
+        perDay[d] += flat / ds.length;
+      }));
+    } else {
+      // "shift" and "session": one amount for the whole entry
+      days.forEach(d => {
+        perDay[d] += flat / days.length;
+      });
+    }
+  }
+  const extra = Number(s.extra) || 0;
+  if (extra) perDay[days[days.length - 1]] += extra;
+  return days.map(d => ({
+    date: d,
+    amount: perDay[d]
+  })).filter(a => a.amount !== 0);
+};
+
+/* ---- pay periods ---- */
+/* Which pay period a single day of work falls in. Returns {id, start, end}.
+   Ids are deterministic so a paycheck keeps its identity across re-renders
+   and confirmations can be matched back to it. */
+const payPeriodFor = (job, date, shift) => {
+  const sched = job.paySchedule || "weekly";
+  if (sched === "perShift") {
+    return {
+      id: `pay:${job.id}:s:${shift.id}`,
+      start: shift.date,
+      end: shiftLastDay(shift)
+    };
+  }
+  if (sched === "weekly" || sched === "biweekly") {
+    const len = sched === "weekly" ? 7 : 14;
+    const anchor = plIsValidDate(job.anchorDate) ? job.anchorDate : "2024-01-06";
+    const diff = plDiff(anchor, date);
+    const n = Math.ceil(diff / len);
+    const end = plAddDays(anchor, n * len);
+    return {
+      id: `pay:${job.id}:${end}`,
+      start: plAddDays(end, -(len - 1)),
+      end
+    };
+  }
+  if (sched === "semimonthly") {
+    const [y, m, d] = date.split("-").map(Number);
+    const start = d <= 15 ? `${y}-${plPad(m)}-01` : `${y}-${plPad(m)}-16`;
+    const end = d <= 15 ? `${y}-${plPad(m)}-15` : plMonthEnd(date);
+    return {
+      id: `pay:${job.id}:${end}`,
+      start,
+      end
+    };
+  }
+  if (sched === "monthly") {
+    const start = date.slice(0, 8) + "01";
+    const end = plMonthEnd(date);
+    return {
+      id: `pay:${job.id}:${end}`,
+      start,
+      end
+    };
+  }
+  return null; // endOfSeason is handled by clustering, not a calendar period
+};
+
+/* Season clusters: shifts separated by more than this many days belong to
+   different seasons (State Fair in August vs. next summer's camp). */
+const SEASON_GAP_DAYS = 30;
+const seasonClusters = shifts => {
+  const sorted = [...shifts].sort((a, b) => a.date < b.date ? -1 : 1);
+  const clusters = [];
+  sorted.forEach(s => {
+    const last = clusters[clusters.length - 1];
+    if (last && plDiff(last.end, s.date) <= SEASON_GAP_DAYS) {
+      last.shifts.push(s);
+      if (shiftLastDay(s) > last.end) last.end = shiftLastDay(s);
+    } else clusters.push({
+      start: s.date,
+      end: shiftLastDay(s),
+      shifts: [s]
+    });
+  });
+  return clusters;
+};
+
+/* Ids of every pay period a shift contributes to — used after a paycheck is
+   confirmed to decide whether the shift is now fully paid. */
+const shiftPeriodIds = (s, job, allShiftsForJob) => {
+  if (!job) return [];
+  if ((job.paySchedule || "weekly") === "endOfSeason") {
+    const c = seasonClusters(allShiftsForJob || [s]).find(cl => cl.shifts.some(x => x.id === s.id));
+    return c ? [`pay:${job.id}:season:${c.start}`] : [];
+  }
+  const ids = new Set();
+  shiftAccruals(s, job).forEach(a => {
+    const p = payPeriodFor(job, a.date, s);
+    if (p) ids.add(p.id);
+  });
+  return [...ids];
+};
+
+/* What-if scenarios are applied by rewriting jobs/shifts before the normal
+   computation, so projections can't drift from how real paychecks work. */
+const applyScenario = (planner, scenario, today) => {
+  if (!scenario) return planner;
+  const dropped = scenario.dropped || {};
+  const rateOv = scenario.rateOverride || {};
+  const extra = scenario.extraHours || {};
+  const jobs = planner.jobs.map(j => {
+    const ov = rateOv[j.id];
+    if (ov === undefined || ov === null || ov === "" || isNaN(Number(ov))) return j;
+    return j.payType === "flat" ? {
+      ...j,
+      flatAmount: Number(ov)
+    } : {
+      ...j,
+      rate: Number(ov)
+    };
+  });
+  let shifts = planner.shifts.filter(s => !dropped[s.id]);
+  jobs.forEach(j => {
+    const add = Number(extra[j.id]) || 0;
+    if (!add || j.payType === "flat") return;
+    /* Extra hours land in each upcoming week the job is already active,
+       attached to that week's last shift date. */
+    const lastInWeek = {};
+    shifts.filter(s => s.jobId === j.id && s.state !== "paid" && s.date >= today).forEach(s => {
+      const w = plWeekStart(s.date);
+      if (!lastInWeek[w] || s.date > lastInWeek[w]) lastInWeek[w] = s.date;
+    });
+    Object.entries(lastInWeek).forEach(([w, d]) => {
+      shifts = [...shifts, {
+        id: `whatif-${j.id}-${w}`,
+        jobId: j.id,
+        date: d,
+        hours: add,
+        noPerShiftAmount: true,
+        state: "scheduled",
+        virtual: true
+      }];
+    });
+  });
+  return {
+    ...planner,
+    jobs,
+    shifts
+  };
+};
+
+/* The main event: unpaid shifts → paychecks, keyed by pay date. */
+const computePaychecks = (planner, opts = {}) => {
+  const today = opts.today || todayISO();
+  const p = applyScenario(planner, opts.scenario, today);
+  const jobsById = {};
+  p.jobs.forEach(j => {
+    jobsById[j.id] = j;
+  });
+  const out = [];
+  p.jobs.forEach(job => {
+    const live = p.shifts.filter(s => s.jobId === job.id && s.state !== "paid");
+    if (!live.length) return;
+    const groups = {};
+    const touch = (period, s, amount, date) => {
+      if (!groups[period.id]) groups[period.id] = {
+        id: period.id,
+        start: period.start,
+        end: period.end,
+        gross: 0,
+        hours: 0,
+        shiftIds: new Set(),
+        scheduled: 0,
+        worked: 0
+      };
+      const g = groups[period.id];
+      g.gross += amount;
+      g.shiftIds.add(s.id);
+      if (date < g.start) g.start = date;
+      if (date > g.end) g.end = date;
+    };
+    if ((job.paySchedule || "weekly") === "endOfSeason") {
+      seasonClusters(live).forEach(c => {
+        const period = {
+          id: `pay:${job.id}:season:${c.start}`,
+          start: c.start,
+          end: c.end
+        };
+        c.shifts.forEach(s => {
+          if ((s.paidKeys || []).includes(period.id)) return;
+          shiftAccruals(s, job).forEach(a => touch(period, s, a.amount, a.date));
+        });
+      });
+    } else {
+      live.forEach(s => {
+        shiftAccruals(s, job).forEach(a => {
+          const period = payPeriodFor(job, a.date, s);
+          if (!period || (s.paidKeys || []).includes(period.id)) return;
+          touch(period, s, a.amount, a.date);
+        });
+      });
+    }
+    const lag = Math.max(0, Number(job.lagDays) || 0);
+    const wh = Math.min(100, Math.max(0, Number(job.withholdingPct) || 0));
+    Object.values(groups).forEach(g => {
+      const shiftObjs = [...g.shiftIds].map(id => live.find(s => s.id === id)).filter(Boolean);
+      const anyScheduled = shiftObjs.some(s => s.state !== "worked");
+      const hours = shiftObjs.reduce((sum, s) => {
+        if (job.payType === "flat") return sum;
+        const inPeriod = shiftDays(s).filter(d => d >= g.start && d <= g.end).length;
+        return sum + shiftHoursPerDay(s) * inPeriod;
+      }, 0);
+      const gross = Math.round(g.gross * 100) / 100;
+      out.push({
+        id: g.id,
+        jobId: job.id,
+        jobName: job.name,
+        color: job.color,
+        periodStart: g.start,
+        periodEnd: g.end,
+        payDate: plAddDays(g.end, lag),
+        gross,
+        net: Math.round(gross * (1 - wh / 100) * 100) / 100,
+        withholdingPct: wh,
+        hours: Math.round(hours * 100) / 100,
+        shiftIds: [...g.shiftIds].filter(id => !String(id).startsWith("whatif-")),
+        anyScheduled,
+        /* Worked-but-unpaid money is owed to you, so it's confirmed; scheduled
+           shifts carry the job's own reliability setting. */
+        confidence: anyScheduled ? job.scheduledConfidence || "confirmed" : "confirmed",
+        account: job.account,
+        category: job.category || "Income"
+      });
+    });
+  });
+  return out.filter(pc => pc.gross > 0).sort((a, b) => a.payDate < b.payDate ? -1 : a.payDate > b.payDate ? 1 : a.jobName < b.jobName ? -1 : 1);
+};
+
+/* Overlapping shifts on the same day. All-day entries (no times) overlap
+   anything else that day; timed entries compare their intervals. */
+const detectConflicts = shifts => {
+  const byDate = {};
+  shifts.forEach(s => {
+    const a = plMinutes(s.start),
+      b = plMinutes(s.end);
+    shiftDays(s).forEach(d => {
+      let lo = 0,
+        hi = 1440;
+      if (a !== null && b !== null) {
+        lo = a;
+        hi = b > a ? b : b + 1440;
+      }
+      (byDate[d] = byDate[d] || []).push({
+        id: s.id,
+        lo,
+        hi
+      });
+    });
+  });
+  const ids = new Set();
+  const dates = new Set();
+  Object.entries(byDate).forEach(([d, list]) => {
+    for (let i = 0; i < list.length; i++) for (let j = i + 1; j < list.length; j++) {
+      const x = list[i],
+        y = list[j];
+      if (x.lo < y.hi && y.lo < x.hi) {
+        ids.add(x.id);
+        ids.add(y.id);
+        dates.add(d);
+      }
+    }
+  });
+  return {
+    ids,
+    dates
+  };
+};
+
+/* ---- projections ---- */
+/* Default "baseline spending": the average of the last three complete months
+   of actual (net-of-reimbursement) expenses. */
+const suggestBaselineMonthly = (transactions, today) => {
+  const thisM = today.slice(0, 7);
+  const totals = {};
+  transactions.forEach(t => {
+    if (t.type !== "expense" || !t.date) return;
+    const k = t.date.slice(0, 7);
+    if (k >= thisM) return;
+    totals[k] = (totals[k] || 0) + netAmount(t);
+  });
+  const months = Object.keys(totals).sort().slice(-3);
+  if (!months.length) return 0;
+  return Math.round(months.reduce((s, k) => s + totals[k], 0) / months.length * 100) / 100;
+};
+
+/* Safe monthly discretionary — the reservoir's release rate. The largest
+   constant monthly spend S such that, walking day by day for a year, the
+   balance never drops below the cushion:
+     cash + income received BEFORE day t − fixed costs through t − S·t/30.44 ≥ cushion
+   Income only counts once it has arrived, so a summer windfall can't fund
+   October. The day where that bound is tightest is reported as the bottleneck.
+   Inflows: [{date, amount}] (already confidence-weighted by the caller).
+   Fixed: monthly recurring commitments; outflows: dated one-offs. */
+const safeMonthlySpend = ({
+  today,
+  startCash,
+  inflows,
+  fixedMonthly,
+  outflows,
+  cushion = 0,
+  horizonDays = 365
+}) => {
+  const MONTH = 30.4375;
+  const inByDay = {},
+    outByDay = {};
+  inflows.forEach(f => {
+    /* Overdue inflows (worked, unconfirmed) are still owed — treat them as
+       arriving tomorrow rather than silently dropping them. */
+    const k = Math.max(1, plDiff(today, f.date));
+    if (k <= horizonDays) inByDay[k] = (inByDay[k] || 0) + f.amount;
+  });
+  outflows.forEach(f => {
+    if (f.date >= today) {
+      const k = Math.max(1, plDiff(today, f.date));
+      if (k <= horizonDays) outByDay[k] = (outByDay[k] || 0) + f.amount;
+    }
+  });
+  let cumIn = 0,
+    cumOut = 0;
+  let best = Infinity,
+    bindDay = horizonDays;
+  for (let t = 1; t <= horizonDays; t++) {
+    cumOut += (outByDay[t] || 0) + fixedMonthly / MONTH;
+    const bound = (startCash + cumIn - cumOut - cushion) / t * MONTH;
+    if (bound < best) {
+      best = bound;
+      bindDay = t;
+    }
+    cumIn += inByDay[t] || 0; // arrives at the END of day t, after its spending
+  }
+  const totalIn = Object.values(inByDay).reduce((s, v) => s + v, 0);
+  const totalOut = Object.values(outByDay).reduce((s, v) => s + v, 0);
+  return {
+    perMonth: Math.round(best * 100) / 100,
+    bindingDate: plAddDays(today, bindDay),
+    simpleAverage: Math.round((totalIn - totalOut - fixedMonthly * 12) / 12 * 100) / 100
+  };
+};
+
+/* Gaps between income arrivals long enough to need savings to bridge, plus a
+   final "runway" if income stops altogether. Spending uses the baseline. */
+const incomeGaps = ({
+  today,
+  startCash,
+  inflows,
+  baselineMonthly,
+  gapDays,
+  outflows = [],
+  horizonDays = 365
+}) => {
+  const daily = (Number(baselineMonthly) || 0) / 30.4375;
+  const tomorrow = plAddDays(today, 1);
+  const evts = inflows.map(f => f.date > today ? f : {
+    ...f,
+    date: tomorrow
+  }).filter(f => plDiff(today, f.date) <= horizonDays).sort((a, b) => a.date < b.date ? -1 : 1);
+  const gaps = [];
+  let balance = startCash;
+  let prevDate = today,
+    prevLabel = null;
+  const spendBetween = (a, b) => {
+    const days = Math.max(0, plDiff(a, b));
+    const extra = outflows.filter(o => o.date > a && o.date <= b).reduce((s, o) => s + o.amount, 0);
+    return days * daily + extra;
+  };
+  // merge same-day arrivals so payday doesn't look like a series of zero-day gaps
+  const merged = [];
+  evts.forEach(e => {
+    const last = merged[merged.length - 1];
+    if (last && last.date === e.date) {
+      last.amount += e.amount;
+      if (e.label && !last.labels.includes(e.label)) last.labels.push(e.label);
+    } else merged.push({
+      date: e.date,
+      amount: e.amount,
+      labels: e.label ? [e.label] : []
+    });
+  });
+  merged.forEach(e => {
+    const len = plDiff(prevDate, e.date);
+    const need = spendBetween(prevDate, e.date);
+    if (len >= gapDays) gaps.push({
+      from: prevDate,
+      to: e.date,
+      days: len,
+      fromLabel: prevLabel,
+      toLabel: e.labels.join(" + "),
+      need: Math.round(need * 100) / 100,
+      have: Math.round(balance * 100) / 100,
+      shortfall: Math.round(Math.max(0, need - balance) * 100) / 100
+    });
+    balance = balance - need + e.amount;
+    prevDate = e.date;
+    prevLabel = e.labels.join(" + ");
+  });
+  let runway = null;
+  if (daily > 0) {
+    const daysLeft = Math.floor(Math.max(0, balance) / daily);
+    runway = {
+      lastIncome: merged.length ? merged[merged.length - 1].date : null,
+      lastLabel: prevLabel,
+      balanceAfter: Math.round(balance * 100) / 100,
+      runsOut: plAddDays(prevDate, daysLeft),
+      daysLeft
+    };
+  }
+  return {
+    gaps,
+    runway
+  };
+};
+
+/* How far off estimates have been, per job: positive = paid more than expected. */
+const varianceByJob = payRecords => {
+  const out = {};
+  payRecords.forEach(r => {
+    if (!(Number(r.expected) > 0)) return;
+    const o = out[r.jobId] = out[r.jobId] || {
+      n: 0,
+      sumPct: 0,
+      sumDiff: 0
+    };
+    o.n++;
+    o.sumPct += (Number(r.actual) - Number(r.expected)) / Number(r.expected) * 100;
+    o.sumDiff += Number(r.actual) - Number(r.expected);
+  });
+  Object.values(out).forEach(o => {
+    o.avgPct = Math.round(o.sumPct / o.n * 10) / 10;
+    o.sumDiff = Math.round(o.sumDiff * 100) / 100;
+  });
+  return out;
+};
+
+/* ================= SHIFT & SEASON PLANNER — UI =================
+   `h` is just React.createElement under a short name. Still no JSX and no
+   build step — it only keeps the new UI readable. Older sections keep the
+   long form; both are equivalent. */
+const h = React.createElement;
+const PL_STATE_COLOR = {
+  scheduled: "#7FA3C0",
+  worked: "#C9A961",
+  paid: "#7FA88A"
+};
+const plCard = extra => ({
+  background: COLORS.surface,
+  border: `1px solid ${COLORS.line}`,
+  borderRadius: 12,
+  padding: 16,
+  minWidth: 0,
+  ...extra
+});
+const plLabel = {
+  fontSize: 12,
+  color: COLORS.textDim,
+  letterSpacing: .3
+};
+const plMono = {
+  fontFamily: "'JetBrains Mono', monospace"
+};
+const plShortTime = t => {
+  const m = plMinutes(t);
+  if (m === null) return "";
+  let hh = Math.floor(m / 60);
+  const mm = m % 60;
+  const ap = hh >= 12 && hh < 24 ? "p" : "a";
+  hh = hh % 12 || 12;
+  return mm ? `${hh}:${plPad(mm)}${ap}` : `${hh}${ap}`;
+};
+const plShiftTimeLabel = s => s.start && s.end ? `${plShortTime(s.start)}–${plShortTime(s.end)}` : "all day";
+const plInitials = name => (name || "?").split(/\s+/).filter(Boolean).slice(0, 2).map(w => w[0]).join("").toUpperCase();
+/* Dates outside the current year carry their year, so "Jun 19" can't be misread
+   as this June when the planner is looking a season ahead. */
+const plLongDate = iso => {
+  const [y, m, d] = iso.split("-").map(Number);
+  return new Date(y, m - 1, d).toLocaleDateString(undefined, {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    ...(y !== new Date().getFullYear() ? {
+      year: "numeric"
+    } : {})
+  });
+};
+const plShortDate = iso => {
+  const [y, m, d] = iso.split("-").map(Number);
+  return new Date(y, m - 1, d).toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    ...(y !== new Date().getFullYear() ? {
+      year: "numeric"
+    } : {})
+  });
+};
+const plMonthName = (y, m) => new Date(y, m, 1).toLocaleDateString(undefined, {
+  month: "long",
+  year: "numeric"
+});
+const plRel = iso => {
+  const d = plDiff(todayISO(), iso);
+  return d === 0 ? "today" : d === 1 ? "tomorrow" : d === -1 ? "yesterday" : d < 0 ? `${-d}d ago` : `in ${d}d`;
+};
+const plIncomeCategory = categories => categories.find(c => c.name === "Income") ? "Income" : (categories[0] || {}).name || "Other";
+const plBlankJob = (jobs, accounts, categories) => ({
+  id: uid(),
+  name: "",
+  color: ACCOUNT_COLOR_CHOICES[jobs.length % ACCOUNT_COLOR_CHOICES.length],
+  payType: "hourly",
+  rate: "",
+  flatAmount: "",
+  flatUnit: "session",
+  paySchedule: "weekly",
+  anchorDate: plNextSaturday(todayISO()),
+  lagDays: 0,
+  withholdingPct: 0,
+  account: (accounts.find(isSpendableAccount) || accounts[0] || {}).id || "",
+  category: plIncomeCategory(categories),
+  scheduledConfidence: "confirmed",
+  defaultStart: "09:00",
+  defaultEnd: "17:00"
+});
+const plJobSummary = (j, accounts) => {
+  const pay = j.payType === "flat" ? `${fmtMoney(j.flatAmount)} ${FLAT_UNIT_LABEL[j.flatUnit] || ""}` : j.payType === "hybrid" ? `${fmtMoney(j.rate)}/hr + ${fmtMoney(j.flatAmount)}/shift` : `${fmtMoney(j.rate)}/hr`;
+  const sched = (SCHEDULE_LABEL[j.paySchedule] || "").toLowerCase();
+  const lag = Number(j.lagDays) ? ` · paid ${j.lagDays}d after` : "";
+  const wh = Number(j.withholdingPct) ? ` · ${j.withholdingPct}% withheld` : "";
+  return `${pay} · ${sched}${lag}${wh} → ${accountName(accounts, j.account)}`;
+};
+/* Small segmented control used across the planner. */
+function Segmented({
+  value,
+  options,
+  onChange,
+  small
+}) {
+  return h("div", {
+    style: {
+      display: "inline-flex",
+      flexWrap: "wrap",
+      gap: 4,
+      background: COLORS.bg,
+      border: `1px solid ${COLORS.line}`,
+      borderRadius: 9,
+      padding: 3
+    }
+  }, options.map(([k, label]) => h("button", {
+    key: k,
+    type: "button",
+    onClick: () => onChange(k),
+    style: {
+      background: value === k ? COLORS.surfaceLight : "transparent",
+      color: value === k ? COLORS.paper : COLORS.textDim,
+      border: `1px solid ${value === k ? COLORS.line : "transparent"}`,
+      borderRadius: 7,
+      padding: small ? "4px 9px" : "6px 12px",
+      fontSize: small ? 11.5 : 12.5,
+      cursor: "pointer"
+    }
+  }, label)));
+}
+
+/* ---------------- job profile editor ---------------- */
+function JobEditor({
+  initial,
+  isNew,
+  accounts,
+  categories,
+  shiftCount,
+  onSave,
+  onDelete,
+  onCancel
+}) {
+  const [j, setJ] = useState(initial);
+  const up = (k, v) => setJ(x => ({
+    ...x,
+    [k]: v
+  }));
+  const hourlyish = j.payType === "hourly" || j.payType === "hybrid";
+  const valid = String(j.name || "").trim() && (hourlyish ? Number(j.rate) > 0 : Number(j.flatAmount) > 0);
+  const save = () => {
+    if (!valid) return;
+    onSave({
+      ...j,
+      name: j.name.trim(),
+      rate: Number(j.rate) || 0,
+      flatAmount: Number(j.flatAmount) || 0,
+      lagDays: Math.max(0, Math.round(Number(j.lagDays) || 0)),
+      withholdingPct: Math.min(100, Math.max(0, Number(j.withholdingPct) || 0))
+    });
+  };
+  const row = {
+    display: "flex",
+    gap: 10,
+    flexWrap: "wrap",
+    alignItems: "flex-end"
+  };
+  const hint = text => h("div", {
+    style: {
+      fontSize: 11.5,
+      color: COLORS.textDim,
+      lineHeight: 1.45
+    }
+  }, text);
+  return h("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 14
+    }
+  }, h("div", {
+    style: row
+  }, h(Field, {
+    label: "Job name"
+  }, h("input", {
+    value: j.name,
+    autoFocus: isNew,
+    placeholder: "e.g. Butterfly House, Camp, State Fair",
+    onChange: e => up("name", e.target.value),
+    style: inputStyle
+  })), h("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 5,
+      fontSize: 12,
+      color: COLORS.textDim
+    }
+  }, h("span", {
+    style: {
+      fontSize: 10.5,
+      letterSpacing: .4,
+      textTransform: "uppercase"
+    }
+  }, "Color"), h("input", {
+    type: "color",
+    value: j.color,
+    onChange: e => up("color", e.target.value),
+    style: {
+      width: 44,
+      height: 34,
+      border: `1px solid ${COLORS.line}`,
+      borderRadius: 6,
+      background: "none",
+      padding: 2,
+      cursor: "pointer"
+    }
+  }))), h("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 6
+    }
+  }, h("span", {
+    style: {
+      ...plLabel,
+      fontSize: 10.5,
+      textTransform: "uppercase",
+      letterSpacing: .4
+    }
+  }, "How it pays"), h(Segmented, {
+    value: j.payType,
+    onChange: v => up("payType", v),
+    options: [["hourly", "Hourly"], ["flat", "Flat / stipend"], ["hybrid", "Hybrid"]]
+  }), hint(j.payType === "hourly" ? "Rate × hours worked. Hours come from each shift's start and end time." : j.payType === "flat" ? "A fixed amount per shift, day, week, or whole session. Multi-day sessions spread their pay across the days they cover." : "An hourly rate plus a fixed amount for every shift worked.")), h("div", {
+    style: row
+  }, hourlyish && h(Field, {
+    label: "Rate ($/hr)"
+  }, h("input", {
+    type: "number",
+    step: "0.01",
+    min: "0",
+    value: j.rate,
+    onChange: e => up("rate", e.target.value),
+    style: inputStyle
+  })), j.payType !== "hourly" && h(Field, {
+    label: j.payType === "hybrid" ? "Plus per shift ($)" : "Amount ($)"
+  }, h("input", {
+    type: "number",
+    step: "0.01",
+    min: "0",
+    value: j.flatAmount,
+    onChange: e => up("flatAmount", e.target.value),
+    style: inputStyle
+  })), j.payType === "flat" && h(Field, {
+    label: "Paid"
+  }, h("select", {
+    value: j.flatUnit,
+    onChange: e => up("flatUnit", e.target.value),
+    style: inputStyle
+  }, Object.entries(FLAT_UNIT_LABEL).map(([k, v]) => h("option", {
+    key: k,
+    value: k
+  }, v))))), h("div", {
+    style: row
+  }, h(Field, {
+    label: "Pay schedule"
+  }, h("select", {
+    value: j.paySchedule,
+    onChange: e => up("paySchedule", e.target.value),
+    style: inputStyle
+  }, Object.entries(SCHEDULE_LABEL).map(([k, v]) => h("option", {
+    key: k,
+    value: k
+  }, v)))), (j.paySchedule === "weekly" || j.paySchedule === "biweekly") && h(Field, {
+    label: "A pay period ends on"
+  }, h("input", {
+    type: "date",
+    value: j.anchorDate || "",
+    onChange: e => up("anchorDate", e.target.value),
+    style: inputStyle
+  })), h(Field, {
+    label: "Paid this many days later"
+  }, h("input", {
+    type: "number",
+    step: "1",
+    min: "0",
+    value: j.lagDays,
+    onChange: e => up("lagDays", e.target.value),
+    style: inputStyle
+  }))), hint("Pay lag moves money into a different month than the work — projections always use the pay date, not the shift date." + (j.paySchedule === "weekly" || j.paySchedule === "biweekly" ? " For the period end, pick any date a pay period has ended on; only the cycle matters." : j.paySchedule === "endOfSeason" ? " Shifts more than 30 days apart count as separate seasons." : "")), h("div", {
+    style: row
+  }, h(Field, {
+    label: "Taxes withheld (%)"
+  }, h("input", {
+    type: "number",
+    step: "0.1",
+    min: "0",
+    max: "100",
+    value: j.withholdingPct,
+    onChange: e => up("withholdingPct", e.target.value),
+    style: inputStyle
+  })), h(Field, {
+    label: "Deposits into"
+  }, h("select", {
+    value: j.account,
+    onChange: e => up("account", e.target.value),
+    style: inputStyle
+  }, accounts.map(a => h("option", {
+    key: a.id,
+    value: a.id
+  }, a.name)))), h(Field, {
+    label: "Category"
+  }, h("select", {
+    value: j.category,
+    onChange: e => up("category", e.target.value),
+    style: inputStyle
+  }, categories.map(c => h("option", {
+    key: c.name,
+    value: c.name
+  }, c.name))))), h("div", {
+    style: row
+  }, h(Field, {
+    label: "Scheduled shifts are"
+  }, h("select", {
+    value: j.scheduledConfidence || "confirmed",
+    onChange: e => up("scheduledConfidence", e.target.value),
+    style: inputStyle
+  }, h("option", {
+    value: "confirmed"
+  }, "Reliable (count fully)"), h("option", {
+    value: "likely"
+  }, "Likely (count 75%)"), h("option", {
+    value: "possible"
+  }, "Possible (count 40%)"))), h(Field, {
+    label: "Usual start"
+  }, h("input", {
+    type: "time",
+    value: j.defaultStart || "",
+    onChange: e => up("defaultStart", e.target.value),
+    style: inputStyle
+  })), h(Field, {
+    label: "Usual end"
+  }, h("input", {
+    type: "time",
+    value: j.defaultEnd || "",
+    onChange: e => up("defaultEnd", e.target.value),
+    style: inputStyle
+  }))), hint("Reliability only affects safe-to-spend and the 90-day forecast — gig work you might not get can be counted cautiously. Worked shifts always count in full."), h("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      gap: 8,
+      flexWrap: "wrap",
+      marginTop: 2
+    }
+  }, !isNew ? h(GhostButton, {
+    onClick: () => {
+      if (!shiftCount || window.confirm(`Delete ${j.name || "this job"} and its ${shiftCount} shift${shiftCount === 1 ? "" : "s"}? Paycheck history and Ledger entries are kept.`)) onDelete(j.id);
+    },
+    style: {
+      color: COLORS.rust,
+      borderColor: `${COLORS.rust}55`
+    }
+  }, h(IconTrash, {
+    size: 14
+  }), " Delete job") : h("span", null), h("div", {
+    style: {
+      display: "flex",
+      gap: 8
+    }
+  }, h(GhostButton, {
+    onClick: onCancel
+  }, "Cancel"), h(PrimaryButton, {
+    onClick: save,
+    style: {
+      opacity: valid ? 1 : .45
+    }
+  }, h(IconCheck, {
+    size: 15
+  }), isNew ? " Add job" : " Save"))));
+}
+
+/* ---------------- shift editor (one tap to open, one tap to save) ---------------- */
+function ShiftEditor({
+  initial,
+  isNew,
+  jobs,
+  conflictIds,
+  onSave,
+  onDelete,
+  onCancel
+}) {
+  const [s, setS] = useState(initial);
+  const [multi, setMulti] = useState(!!(initial.endDate && initial.endDate > initial.date));
+  const [allDay, setAllDay] = useState(!initial.start && !initial.end && !isNew);
+  const [advanced, setAdvanced] = useState(!!(initial.hours !== undefined && initial.hours !== "" || initial.amountOverride !== undefined && initial.amountOverride !== "" || Number(initial.extra)));
+  const [repeatUntil, setRepeatUntil] = useState("");
+  const job = jobs.find(j => j.id === s.jobId);
+  const up = (k, v) => setS(x => ({
+    ...x,
+    [k]: v
+  }));
+  const pickJob = id => {
+    const nj = jobs.find(j => j.id === id);
+    setS(x => isNew && nj ? {
+      ...x,
+      jobId: id,
+      start: allDay ? "" : nj.defaultStart || x.start,
+      end: allDay ? "" : nj.defaultEnd || x.end
+    } : {
+      ...x,
+      jobId: id
+    });
+    /* camp-style flat jobs are usually multi-day sessions */
+    if (isNew && nj && nj.payType === "flat" && (nj.flatUnit === "session" || nj.flatUnit === "week")) {
+      setMulti(true);
+      setAllDay(true);
+    }
+  };
+  const cleaned = () => {
+    const out = {
+      ...s,
+      endDate: multi && s.endDate && s.endDate > s.date ? s.endDate : "",
+      start: allDay ? "" : s.start,
+      end: allDay ? "" : s.end
+    };
+    if (!advanced) {
+      delete out.hours;
+      delete out.amountOverride;
+      out.extra = "";
+    }
+    return out;
+  };
+  const preview = job ? shiftAccruals(cleaned(), job) : [];
+  const gross = preview.reduce((t, a) => t + a.amount, 0);
+  const hoursEach = shiftHoursPerDay(cleaned());
+  const payDate = (() => {
+    if (!job || !preview.length) return null;
+    if (job.paySchedule === "endOfSeason") return null;
+    const last = preview[preview.length - 1];
+    const per = payPeriodFor(job, last.date, cleaned());
+    return per ? plAddDays(per.end, Number(job.lagDays) || 0) : null;
+  })();
+  /* Hourly pay needs hours from somewhere — times, an hours override, or an
+     exact-pay override — otherwise the shift would quietly earn $0. */
+  const hasExact = advanced && s.amountOverride !== undefined && s.amountOverride !== null && s.amountOverride !== "";
+  const needsHours = !!job && job.payType !== "flat" && !hasExact;
+  const valid = !!job && plIsValidDate(s.date) && (!multi || !s.endDate || s.endDate >= s.date) && (!needsHours || hoursEach > 0);
+  const save = () => {
+    if (!valid) return;
+    const base = cleaned();
+    const copies = [base];
+    if (isNew && plIsValidDate(repeatUntil) && repeatUntil > base.date) {
+      const span = base.endDate ? plDiff(base.date, base.endDate) : 0;
+      let d = plAddDays(base.date, 7),
+        guard = 0;
+      while (d <= repeatUntil && guard < 104) {
+        copies.push({
+          ...base,
+          id: uid(),
+          date: d,
+          endDate: span ? plAddDays(d, span) : "",
+          state: "scheduled"
+        });
+        d = plAddDays(d, 7);
+        guard++;
+      }
+    }
+    onSave(copies);
+  };
+  const paid = initial.state === "paid";
+  const row = {
+    display: "flex",
+    gap: 10,
+    flexWrap: "wrap",
+    alignItems: "flex-end"
+  };
+  const chk = (checked, onChange, label) => h("label", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 7,
+      fontSize: 12.5,
+      color: COLORS.textDim,
+      cursor: "pointer"
+    }
+  }, h("input", {
+    type: "checkbox",
+    checked,
+    onChange: e => onChange(e.target.checked)
+  }), label);
+  return h("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 12
+    }
+  }, paid && h("div", {
+    style: {
+      fontSize: 12,
+      color: COLORS.sage,
+      background: `${COLORS.sage}14`,
+      border: `1px solid ${COLORS.sage}44`,
+      borderRadius: 8,
+      padding: "8px 10px"
+    }
+  }, "This shift has been paid. Changes to times or pay won't affect anything — undo the paycheck under Received pay if it was confirmed by mistake."), conflictIds && conflictIds.has(initial.id) && h("div", {
+    style: {
+      fontSize: 12,
+      color: COLORS.rust,
+      background: `${COLORS.rust}14`,
+      border: `1px solid ${COLORS.rust}44`,
+      borderRadius: 8,
+      padding: "8px 10px"
+    }
+  }, "⚠ Overlaps another shift on the same day."), h("div", {
+    style: row
+  }, h(Field, {
+    label: "Job"
+  }, h("select", {
+    value: s.jobId,
+    onChange: e => pickJob(e.target.value),
+    style: inputStyle
+  }, jobs.map(j => h("option", {
+    key: j.id,
+    value: j.id
+  }, j.name)))), h(Field, {
+    label: multi ? "Starts" : "Date"
+  }, h("input", {
+    type: "date",
+    value: s.date,
+    onChange: e => up("date", e.target.value),
+    style: inputStyle
+  })), multi && h(Field, {
+    label: "Ends"
+  }, h("input", {
+    type: "date",
+    value: s.endDate || "",
+    min: s.date,
+    onChange: e => up("endDate", e.target.value),
+    style: inputStyle
+  }))), h("div", {
+    style: {
+      display: "flex",
+      gap: 16,
+      flexWrap: "wrap"
+    }
+  }, chk(multi, v => {
+    setMulti(v);
+    if (v && !(s.endDate > s.date)) up("endDate", plAddDays(s.date, 4));
+  }, "Multi-day (session / block)"), chk(allDay, v => {
+    setAllDay(v);
+    if (!v && job) setS(x => ({
+      ...x,
+      start: x.start || job.defaultStart || "09:00",
+      end: x.end || job.defaultEnd || "17:00"
+    }));
+  }, multi ? "No daily times" : "All day / no set times")), !allDay && h("div", {
+    style: row
+  }, h(Field, {
+    label: multi ? "Each day starts" : "Start"
+  }, h("input", {
+    type: "time",
+    value: s.start || "",
+    onChange: e => up("start", e.target.value),
+    style: inputStyle
+  })), h(Field, {
+    label: multi ? "Each day ends" : "End"
+  }, h("input", {
+    type: "time",
+    value: s.end || "",
+    onChange: e => up("end", e.target.value),
+    style: inputStyle
+  }))), !paid && h("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 6
+    }
+  }, h("span", {
+    style: {
+      ...plLabel,
+      fontSize: 10.5,
+      textTransform: "uppercase",
+      letterSpacing: .4
+    }
+  }, "Status"), h(Segmented, {
+    value: s.state === "worked" ? "worked" : "scheduled",
+    onChange: v => up("state", v),
+    options: [["scheduled", "Scheduled"], ["worked", "Worked"]],
+    small: true
+  })), h("button", {
+    type: "button",
+    onClick: () => setAdvanced(a => !a),
+    style: {
+      alignSelf: "flex-start",
+      background: "transparent",
+      border: "none",
+      color: advanced ? COLORS.steel : COLORS.textDim,
+      fontSize: 12,
+      cursor: "pointer",
+      padding: 0,
+      textDecoration: "underline",
+      textUnderlineOffset: 2
+    }
+  }, advanced ? "− fewer options" : "+ tips, bonus, or exact pay"), advanced && h("div", {
+    style: row
+  }, job && job.payType !== "flat" && h(Field, {
+    label: multi ? "Hours per day (override)" : "Hours (override)"
+  }, h("input", {
+    type: "number",
+    step: "0.25",
+    min: "0",
+    placeholder: hoursEach ? String(Math.round(hoursEach * 100) / 100) : "",
+    value: s.hours ?? "",
+    onChange: e => up("hours", e.target.value),
+    style: inputStyle
+  })), h(Field, {
+    label: "Tips / bonus ($)"
+  }, h("input", {
+    type: "number",
+    step: "0.01",
+    min: "0",
+    value: s.extra ?? "",
+    onChange: e => up("extra", e.target.value),
+    style: inputStyle
+  })), h(Field, {
+    label: "Exact pay ($, replaces estimate)"
+  }, h("input", {
+    type: "number",
+    step: "0.01",
+    min: "0",
+    value: s.amountOverride ?? "",
+    onChange: e => up("amountOverride", e.target.value),
+    style: inputStyle
+  }))), h(Field, {
+    label: "Note"
+  }, h("input", {
+    value: s.note || "",
+    placeholder: "optional",
+    onChange: e => up("note", e.target.value),
+    style: inputStyle
+  })), isNew && h(Field, {
+    label: "Repeat weekly until (optional)"
+  }, h("input", {
+    type: "date",
+    value: repeatUntil,
+    min: s.date,
+    onChange: e => setRepeatUntil(e.target.value),
+    style: inputStyle
+  })), job && h("div", {
+    style: {
+      fontSize: 12.5,
+      color: COLORS.textDim,
+      background: COLORS.bg,
+      border: `1px solid ${COLORS.line}`,
+      borderRadius: 8,
+      padding: "8px 10px"
+    }
+  }, needsHours && hoursEach === 0 ? h("span", {
+    style: {
+      color: COLORS.rust
+    }
+  }, "Hourly pay needs a start and end time, or an hours override under \"+ tips, bonus, or exact pay\". ") : null, "Earns ≈ ", h("span", {
+    style: {
+      ...plMono,
+      color: COLORS.gold,
+      fontWeight: 600
+    }
+  }, fmtMoney(gross)), " gross", Number(job.withholdingPct) ? ` (${fmtMoney(gross * (1 - Number(job.withholdingPct) / 100))} take-home)` : "", job.paySchedule === "endOfSeason" ? " · paid at the end of the season" : payDate ? ` · paid around ${plShortDate(payDate)}` : "", hoursEach && job.payType !== "flat" ? ` · ${Math.round(hoursEach * 100) / 100}h${multi ? "/day" : ""}` : ""), h("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      gap: 8,
+      flexWrap: "wrap"
+    }
+  }, !isNew ? h(GhostButton, {
+    onClick: () => onDelete(initial.id),
+    style: {
+      color: COLORS.rust,
+      borderColor: `${COLORS.rust}55`
+    }
+  }, h(IconTrash, {
+    size: 14
+  }), " Delete") : h("span", null), h("div", {
+    style: {
+      display: "flex",
+      gap: 8
+    }
+  }, h(GhostButton, {
+    onClick: onCancel
+  }, "Cancel"), h(PrimaryButton, {
+    onClick: save,
+    style: {
+      opacity: valid ? 1 : .45
+    }
+  }, h(IconCheck, {
+    size: 15
+  }), isNew ? " Add" : " Save"))));
+}
+
+/* ---------------- calendar ---------------- */
+function PlannerCalendar({
+  year,
+  month,
+  shifts,
+  jobsById,
+  conflicts,
+  today,
+  onDay,
+  onShift
+}) {
+  const first = `${year}-${plPad(month + 1)}-01`;
+  const offset = (plWeekday(first) + 6) % 7; // Monday-first grid
+  const gridStart = plAddDays(first, -offset);
+  const daysInMonth = Number(plMonthEnd(first).slice(8));
+  const cells = Math.ceil((offset + daysInMonth) / 7) * 7;
+  const byDate = {};
+  shifts.forEach(s => shiftDays(s).forEach(d => {
+    (byDate[d] = byDate[d] || []).push(s);
+  }));
+  Object.values(byDate).forEach(list => list.sort((a, b) => (a.start || "") < (b.start || "") ? -1 : 1));
+  const dows = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+  return h("div", null, h("div", {
+    className: "pl-cal",
+    style: {
+      marginBottom: 4
+    }
+  }, dows.map(d => h("div", {
+    key: d,
+    style: {
+      fontSize: 10.5,
+      color: COLORS.textDim,
+      textAlign: "center",
+      letterSpacing: .3
+    }
+  }, d))), h("div", {
+    className: "pl-cal"
+  }, Array.from({
+    length: cells
+  }, (_, i) => {
+    const d = plAddDays(gridStart, i);
+    const inMonth = d.slice(5, 7) === plPad(month + 1);
+    const list = byDate[d] || [];
+    const isToday = d === today;
+    const conflict = conflicts.dates.has(d);
+    return h("div", {
+      key: d,
+      className: "pl-day",
+      role: "button",
+      title: plLongDate(d),
+      onClick: () => onDay(d),
+      style: {
+        background: inMonth ? COLORS.bg : "transparent",
+        border: `1px solid ${isToday ? COLORS.gold : inMonth ? COLORS.line : "transparent"}`,
+        borderRadius: 7,
+        padding: "4px 4px 5px",
+        cursor: "pointer",
+        opacity: inMonth ? 1 : .35,
+        display: "flex",
+        flexDirection: "column",
+        gap: 3,
+        minWidth: 0,
+        overflow: "hidden"
+      }
+    }, h("div", {
+      style: {
+        display: "flex",
+        justifyContent: "space-between",
+        alignItems: "center",
+        fontSize: 11,
+        color: isToday ? COLORS.gold : COLORS.textDim,
+        fontWeight: isToday ? 700 : 400
+      }
+    }, h("span", null, Number(d.slice(8))), conflict && h("span", {
+      title: "Overlapping shifts",
+      style: {
+        color: COLORS.rust,
+        fontSize: 11
+      }
+    }, "⚠")), list.slice(0, 3).map(s => {
+      const job = jobsById[s.jobId] || {
+        color: COLORS.textDim,
+        name: "?"
+      };
+      const block = s.endDate && s.endDate > s.date;
+      return h("div", {
+        key: s.id,
+        className: "pl-chip",
+        title: `${job.name} · ${plShiftTimeLabel(s)} · ${s.state}${block ? ` · ${plFmtRange(s.date, s.endDate)}` : ""}`,
+        onClick: e => {
+          e.stopPropagation();
+          onShift(s);
+        },
+        style: {
+          background: s.state === "scheduled" ? `${job.color}26` : `${job.color}55`,
+          border: s.state === "scheduled" ? `1px dashed ${job.color}99` : `1px solid ${job.color}`,
+          boxShadow: `inset 3px 0 0 ${job.color}`,
+          borderRadius: 4,
+          padding: "1px 4px",
+          fontSize: 10.5,
+          color: COLORS.text,
+          whiteSpace: "nowrap",
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          opacity: s.state === "paid" ? .6 : 1,
+          cursor: "pointer"
+        }
+      }, h("span", {
+        className: "pl-chip-text"
+      }, plInitials(job.name), " ", block ? "" : plShiftTimeLabel(s).replace("all day", ""), s.state === "paid" ? " ✓" : ""));
+    }), list.length > 3 && h("div", {
+      style: {
+        fontSize: 10,
+        color: COLORS.textDim
+      }
+    }, "+", list.length - 3));
+  })));
+}
+
+/* ---------------- year strip: job seasons as bars ---------------- */
+function PlannerYearStrip({
+  year,
+  jobs,
+  shifts,
+  today
+}) {
+  const yStart = `${year}-01-01`,
+    yEnd = `${year}-12-31`;
+  const span = plDiff(yStart, yEnd) + 1;
+  const pct = d => Math.min(100, Math.max(0, plDiff(yStart, d) / span * 100));
+  const rows = jobs.map(j => {
+    const js = shifts.filter(s => s.jobId === j.id && shiftLastDay(s) >= yStart && s.date <= yEnd);
+    return {
+      job: j,
+      clusters: js.length ? seasonClusters(js) : []
+    };
+  }).filter(r => r.clusters.length);
+  const months = "JFMAMJJASOND".split("");
+  if (!rows.length) return h("div", {
+    style: {
+      fontSize: 12.5,
+      color: COLORS.textDim
+    }
+  }, "No shifts in ", year, " yet.");
+  const todayPct = today >= yStart && today <= yEnd ? pct(today) : null;
+  return h("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 6
+    }
+  }, h("div", {
+    style: {
+      position: "relative",
+      height: 14,
+      marginLeft: 0
+    }
+  }, months.map((m, i) => h("span", {
+    key: i,
+    style: {
+      position: "absolute",
+      left: `${pct(`${year}-${plPad(i + 1)}-01`)}%`,
+      fontSize: 10,
+      color: COLORS.textDim
+    }
+  }, m))), rows.map(r => h("div", {
+    key: r.job.id
+  }, h("div", {
+    style: {
+      fontSize: 11,
+      color: COLORS.textDim,
+      marginBottom: 2
+    }
+  }, r.job.name), h("div", {
+    style: {
+      position: "relative",
+      height: 12,
+      background: COLORS.bg,
+      borderRadius: 4,
+      overflow: "hidden"
+    }
+  }, months.map((m, i) => i > 0 && h("div", {
+    key: i,
+    style: {
+      position: "absolute",
+      left: `${pct(`${year}-${plPad(i + 1)}-01`)}%`,
+      top: 0,
+      bottom: 0,
+      width: 1,
+      background: COLORS.line
+    }
+  })), r.clusters.map(c => {
+    const a = c.start < yStart ? yStart : c.start;
+    const b = c.end > yEnd ? yEnd : c.end;
+    return h("div", {
+      key: c.start,
+      title: `${r.job.name}: ${plShortDate(c.start)} – ${plShortDate(c.end)} (${c.shifts.length} shift${c.shifts.length === 1 ? "" : "s"})`,
+      style: {
+        position: "absolute",
+        left: `${pct(a)}%`,
+        width: `${Math.max(.6, pct(b) - pct(a) + 100 / span)}%`,
+        top: 2,
+        bottom: 2,
+        background: r.job.color,
+        borderRadius: 3
+      }
+    });
+  }), todayPct !== null && h("div", {
+    style: {
+      position: "absolute",
+      left: `${todayPct}%`,
+      top: 0,
+      bottom: 0,
+      width: 2,
+      background: COLORS.paper,
+      opacity: .7
+    }
+  })))));
+}
+
+/* ---------------- monthly projection + cumulative charts ---------------- */
+function PlannerMonthChart({
+  months,
+  baseline
+}) {
+  const W = 640,
+    H = 200,
+    padL = 50,
+    padR = 8,
+    padT = 10,
+    padB = 26;
+  const iw = W - padL - padR,
+    ih = H - padT - padB;
+  const maxV = Math.max(1, baseline, ...months.map(m => m.actual + m.projected));
+  const y = v => padT + ih - v / maxV * ih;
+  const slot = iw / 12,
+    bw = Math.max(6, slot * .62);
+  return h("svg", {
+    viewBox: `0 0 ${W} ${H}`,
+    style: {
+      width: "100%",
+      height: "auto",
+      overflow: "visible"
+    }
+  }, [0, .5, 1].map(t => h("g", {
+    key: t
+  }, h("line", {
+    x1: padL,
+    x2: W - padR,
+    y1: padT + ih * t,
+    y2: padT + ih * t,
+    stroke: COLORS.line
+  }), h("text", {
+    x: padL - 6,
+    y: padT + ih * t + 3,
+    fontSize: 10,
+    fill: COLORS.textDim,
+    textAnchor: "end"
+  }, fmtMoney(maxV * (1 - t)).replace(/\.00$/, "")))), months.map((m, i) => {
+    const x = padL + slot * i + (slot - bw) / 2;
+    const aTop = y(m.actual);
+    const pTop = y(m.actual + m.projected);
+    return h("g", {
+      key: m.key
+    }, h("title", null, `${m.label}: ${fmtMoney(m.actual)} received${m.projected ? ` + ${fmtMoney(m.projected)} expected` : ""}${m.lean ? " — under baseline spending" : ""}`), m.actual > 0 && h("rect", {
+      x,
+      y: aTop,
+      width: bw,
+      height: padT + ih - aTop,
+      fill: COLORS.sage,
+      rx: 2
+    }), m.projected > 0 && h("rect", {
+      x,
+      y: pTop,
+      width: bw,
+      height: aTop - pTop,
+      fill: `${COLORS.gold}55`,
+      stroke: COLORS.gold,
+      strokeDasharray: "3 2",
+      rx: 2
+    }), h("text", {
+      x: x + bw / 2,
+      y: H - 9,
+      fontSize: 10.5,
+      fill: m.lean ? COLORS.rust : m.isCurrent ? COLORS.paper : COLORS.textDim,
+      fontWeight: m.isCurrent ? 700 : 400,
+      textAnchor: "middle"
+    }, m.label), m.lean && h("circle", {
+      cx: x + bw / 2,
+      cy: H - 2,
+      r: 2,
+      fill: COLORS.rust
+    }));
+  }), baseline > 0 && h("g", null, h("line", {
+    x1: padL,
+    x2: W - padR,
+    y1: y(baseline),
+    y2: y(baseline),
+    stroke: COLORS.rust,
+    strokeWidth: 1.5,
+    strokeDasharray: "5 4"
+  }), h("text", {
+    x: W - padR,
+    y: y(baseline) - 4,
+    fontSize: 10,
+    fill: COLORS.rust,
+    textAnchor: "end"
+  }, "baseline spending")));
+}
+function PlannerCumulativeChart({
+  months,
+  baseline
+}) {
+  const W = 640,
+    H = 170,
+    padL = 50,
+    padR = 8,
+    padT = 10,
+    padB = 22;
+  const iw = W - padL - padR,
+    ih = H - padT - padB;
+  let ci = 0;
+  const inc = months.map(m => ci += m.actual + m.projected);
+  const sp = months.map((m, i) => baseline * (i + 1));
+  const maxV = Math.max(1, ...inc, ...sp);
+  const x = i => padL + i / 11 * iw;
+  const y = v => padT + ih - v / maxV * ih;
+  const path = arr => arr.map((v, i) => `${i ? "L" : "M"} ${x(i)} ${y(v)}`).join(" ");
+  const endGap = inc[11] - sp[11];
+  return h("div", null, h("svg", {
+    viewBox: `0 0 ${W} ${H}`,
+    style: {
+      width: "100%",
+      height: "auto",
+      overflow: "visible"
+    }
+  }, [0, .5, 1].map(t => h("g", {
+    key: t
+  }, h("line", {
+    x1: padL,
+    x2: W - padR,
+    y1: padT + ih * t,
+    y2: padT + ih * t,
+    stroke: COLORS.line
+  }), h("text", {
+    x: padL - 6,
+    y: padT + ih * t + 3,
+    fontSize: 10,
+    fill: COLORS.textDim,
+    textAnchor: "end"
+  }, fmtMoney(maxV * (1 - t)).replace(/\.00$/, "")))), baseline > 0 && h("path", {
+    d: path(sp),
+    fill: "none",
+    stroke: COLORS.rust,
+    strokeWidth: 1.6,
+    strokeDasharray: "5 4"
+  }), h("path", {
+    d: path(inc),
+    fill: "none",
+    stroke: COLORS.gold,
+    strokeWidth: 2.4
+  }), months.map((m, i) => i % 2 === 0 && h("text", {
+    key: m.key,
+    x: x(i),
+    y: H - 6,
+    fontSize: 10,
+    fill: COLORS.textDim,
+    textAnchor: "middle"
+  }, m.label))), h("div", {
+    style: {
+      display: "flex",
+      gap: 14,
+      flexWrap: "wrap",
+      fontSize: 11.5,
+      color: COLORS.textDim,
+      marginTop: 6
+    }
+  }, h("span", null, h("span", {
+    style: {
+      display: "inline-block",
+      width: 12,
+      height: 2,
+      background: COLORS.gold,
+      verticalAlign: "middle",
+      marginRight: 5
+    }
+  }), "Income so far + expected"), baseline > 0 && h("span", null, h("span", {
+    style: {
+      display: "inline-block",
+      width: 12,
+      borderTop: `2px dashed ${COLORS.rust}`,
+      verticalAlign: "middle",
+      marginRight: 5
+    }
+  }), "Baseline spending"), baseline > 0 && h("span", {
+    style: {
+      color: endGap >= 0 ? COLORS.sage : COLORS.rust
+    }
+  }, endGap >= 0 ? `Year ends ${fmtMoney(endGap)} ahead` : `Year ends ${fmtMoney(-endGap)} short — savings have to cover it`)));
+}
+
+/* ---------------- confirm a paycheck actually landed ---------------- */
+function ConfirmPaycheckForm({
+  paycheck,
+  accounts,
+  onConfirm,
+  onCancel
+}) {
+  const [amount, setAmount] = useState(String(paycheck.net));
+  const [date, setDate] = useState(paycheck.payDate <= todayISO() ? paycheck.payDate : todayISO());
+  const [account, setAccount] = useState(paycheck.account || (accounts[0] || {}).id || "");
+  const actual = Number(amount);
+  const diff = Math.round((actual - paycheck.net) * 100) / 100;
+  const pct = paycheck.net ? diff / paycheck.net * 100 : 0;
+  const ok = actual > 0 && plIsValidDate(date) && account;
+  return h("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 12
+    }
+  }, h("div", {
+    style: {
+      fontSize: 12.5,
+      color: COLORS.textDim,
+      lineHeight: 1.5
+    }
+  }, h("span", {
+    style: {
+      color: COLORS.text
+    }
+  }, paycheck.jobName), " · work ", plFmtRange(paycheck.periodStart, paycheck.periodEnd), paycheck.hours ? ` · ${paycheck.hours}h` : "", " · expected ", h("span", {
+    style: {
+      ...plMono,
+      color: COLORS.gold
+    }
+  }, fmtMoney(paycheck.net)), paycheck.withholdingPct ? ` (${fmtMoney(paycheck.gross)} before ${paycheck.withholdingPct}% withholding)` : ""), h("div", {
+    style: {
+      display: "flex",
+      gap: 10,
+      flexWrap: "wrap",
+      alignItems: "flex-end"
+    }
+  }, h(Field, {
+    label: "Actually received ($)"
+  }, h("input", {
+    type: "number",
+    step: "0.01",
+    min: "0",
+    autoFocus: true,
+    value: amount,
+    onChange: e => setAmount(e.target.value),
+    style: inputStyle
+  })), h(Field, {
+    label: "Date"
+  }, h("input", {
+    type: "date",
+    value: date,
+    onChange: e => setDate(e.target.value),
+    style: inputStyle
+  })), h(Field, {
+    label: "Into"
+  }, h("select", {
+    value: account,
+    onChange: e => setAccount(e.target.value),
+    style: inputStyle
+  }, accounts.map(a => h("option", {
+    key: a.id,
+    value: a.id
+  }, a.name))))), actual > 0 && h("div", {
+    style: {
+      fontSize: 12,
+      color: Math.abs(diff) < .01 ? COLORS.sage : COLORS.textDim
+    }
+  }, Math.abs(diff) < .01 ? "Exactly as estimated." : `${diff > 0 ? "+" : ""}${fmtMoney(diff)} (${pct > 0 ? "+" : ""}${pct.toFixed(1)}%) vs. the estimate — tracked so you can see how reliable your estimates are.`), h("div", {
+    style: {
+      fontSize: 11.5,
+      color: COLORS.textDim
+    }
+  }, "Creates an income entry in Ledger and marks this period's shifts paid."), h("div", {
+    style: {
+      display: "flex",
+      justifyContent: "flex-end",
+      gap: 8
+    }
+  }, h(GhostButton, {
+    onClick: onCancel
+  }, "Cancel"), h(PrimaryButton, {
+    onClick: () => ok && onConfirm({
+      actual: Math.round(actual * 100) / 100,
+      date,
+      account
+    }),
+    style: {
+      opacity: ok ? 1 : .45
+    }
+  }, h(IconCheck, {
+    size: 15
+  }), " Record paycheck")));
+}
+
+/* ---------------- what-if ---------------- */
+function PlannerWhatIf({
+  jobs,
+  shifts,
+  scenario,
+  setScenario,
+  today,
+  base,
+  alt
+}) {
+  const set = (bucket, key, val) => setScenario(sc => ({
+    ...sc,
+    [bucket]: {
+      ...(sc[bucket] || {}),
+      [key]: val
+    }
+  }));
+  const activeJobs = jobs.filter(j => shifts.some(s => s.jobId === j.id && s.state !== "paid" && shiftLastDay(s) >= today));
+  const blocks = shifts.filter(s => s.state !== "paid" && s.date >= today && (s.endDate && s.endDate > s.date || (jobs.find(j => j.id === s.jobId) || {}).payType === "flat")).sort((a, b) => a.date < b.date ? -1 : 1).slice(0, 12);
+  const delta = (a, b, money = true) => {
+    const d = Math.round((b - a) * 100) / 100;
+    if (Math.abs(d) < .005) return h("span", {
+      style: {
+        color: COLORS.textDim
+      }
+    }, " (no change)");
+    return h("span", {
+      style: {
+        color: d > 0 ? COLORS.sage : COLORS.rust
+      }
+    }, ` (${d > 0 ? "+" : "−"}${money ? fmtMoney(Math.abs(d)) : Math.abs(d)})`);
+  };
+  if (!activeJobs.length) return h("div", {
+    style: {
+      fontSize: 12.5,
+      color: COLORS.textDim
+    }
+  }, "Add some upcoming shifts first — what-ifs adjust future work.");
+  return h("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 14
+    }
+  }, activeJobs.map(j => {
+    const hourly = j.payType !== "flat";
+    const extra = Number((scenario.extraHours || {})[j.id]) || 0;
+    const rate = (scenario.rateOverride || {})[j.id];
+    const baseRate = hourly ? j.rate : j.flatAmount;
+    return h("div", {
+      key: j.id,
+      style: {
+        display: "flex",
+        flexDirection: "column",
+        gap: 6
+      }
+    }, h("div", {
+      style: {
+        fontSize: 12.5,
+        color: COLORS.text,
+        display: "flex",
+        alignItems: "center",
+        gap: 7
+      }
+    }, h("span", {
+      style: {
+        width: 9,
+        height: 9,
+        borderRadius: "50%",
+        background: j.color
+      }
+    }), j.name), h("div", {
+      style: {
+        display: "flex",
+        gap: 14,
+        flexWrap: "wrap",
+        alignItems: "center",
+        fontSize: 12,
+        color: COLORS.textDim
+      }
+    }, hourly && h("label", {
+      style: {
+        display: "flex",
+        alignItems: "center",
+        gap: 8
+      }
+    }, "Hours/week", h("input", {
+      type: "range",
+      min: -10,
+      max: 20,
+      step: 1,
+      value: extra,
+      onChange: e => set("extraHours", j.id, Number(e.target.value)),
+      style: {
+        width: 130,
+        accentColor: COLORS.gold
+      }
+    }), h("span", {
+      style: {
+        ...plMono,
+        width: 34,
+        color: extra ? COLORS.gold : COLORS.textDim
+      }
+    }, extra > 0 ? `+${extra}` : extra)), h("label", {
+      style: {
+        display: "flex",
+        alignItems: "center",
+        gap: 8
+      }
+    }, hourly ? "Rate $/hr" : "Amount $", h("input", {
+      type: "number",
+      step: "0.25",
+      min: "0",
+      placeholder: String(baseRate),
+      value: rate ?? "",
+      onChange: e => set("rateOverride", j.id, e.target.value === "" ? undefined : e.target.value),
+      style: {
+        ...inputStyle,
+        width: 90,
+        padding: "5px 8px",
+        fontSize: 12
+      }
+    }))));
+  }), blocks.length > 0 && h("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 5
+    }
+  }, h("div", {
+    style: {
+      fontSize: 12,
+      color: COLORS.textDim
+    }
+  }, "Include these sessions"), blocks.map(s => {
+    const j = jobs.find(x => x.id === s.jobId) || {};
+    const dropped = !!(scenario.dropped || {})[s.id];
+    return h("label", {
+      key: s.id,
+      style: {
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        fontSize: 12.5,
+        color: dropped ? COLORS.textDim : COLORS.text,
+        textDecoration: dropped ? "line-through" : "none",
+        cursor: "pointer"
+      }
+    }, h("input", {
+      type: "checkbox",
+      checked: !dropped,
+      onChange: e => set("dropped", s.id, !e.target.checked)
+    }), h("span", {
+      style: {
+        width: 8,
+        height: 8,
+        borderRadius: "50%",
+        background: j.color
+      }
+    }), j.name, " · ", plFmtRange(s.date, shiftLastDay(s)), s.note ? ` · ${s.note}` : "");
+  })), h("div", {
+    style: {
+      background: COLORS.bg,
+      border: `1px solid ${COLORS.line}`,
+      borderRadius: 8,
+      padding: "10px 12px",
+      fontSize: 12.5,
+      color: COLORS.textDim,
+      display: "flex",
+      flexDirection: "column",
+      gap: 4
+    }
+  }, h("div", null, "Next 12 months of job income: ", h("span", {
+    style: {
+      ...plMono,
+      color: COLORS.text
+    }
+  }, fmtMoney(alt.income12)), delta(base.income12, alt.income12)), h("div", null, "Safe to spend: ", h("span", {
+    style: {
+      ...plMono,
+      color: COLORS.text
+    }
+  }, fmtMoney(alt.safe), "/mo"), delta(base.safe, alt.safe)), h("div", null, "Lean months ahead: ", h("span", {
+    style: {
+      ...plMono,
+      color: COLORS.text
+    }
+  }, alt.lean), delta(base.lean, alt.lean, false))), h("div", null, h(GhostButton, {
+    onClick: () => setScenario({}),
+    style: {
+      padding: "5px 10px",
+      fontSize: 12
+    }
+  }, "Reset what-ifs")));
+}
+
+/* ---------------- the planner tab ---------------- */
+function PlannerView({
+  planner,
+  setPlanner,
+  accounts,
+  categories,
+  transactions,
+  paychecks,
+  reservoir,
+  baselineMonthly,
+  suggestedBaseline,
+  otherInflows,
+  computeReservoirFor,
+  txIds,
+  onConfirm,
+  onUndo,
+  today
+}) {
+  const [cal, setCal] = useState(() => ({
+    y: Number(today.slice(0, 4)),
+    m: Number(today.slice(5, 7)) - 1
+  }));
+  const [projYear, setProjYear] = useState(Number(today.slice(0, 4)));
+  const [jobModal, setJobModal] = useState(null); // {job, isNew}
+  const [shiftModal, setShiftModal] = useState(null); // {shift, isNew}
+  const [daySheet, setDaySheet] = useState(null); // ISO date
+  const [scenario, setScenario] = useState({});
+  const [showWhatIf, setShowWhatIf] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const {
+    jobs,
+    shifts,
+    payRecords,
+    settings
+  } = planner;
+  const jobsById = useMemo(() => Object.fromEntries(jobs.map(j => [j.id, j])), [jobs]);
+  const conflicts = useMemo(() => detectConflicts(shifts.filter(s => s.state !== "paid")), [shifts]);
+  const scenarioActive = ["extraHours", "rateOverride", "dropped"].some(k => Object.values(scenario[k] || {}).some(v => v !== undefined && v !== "" && v !== 0 && v !== false));
+  const altPaychecks = useMemo(() => scenarioActive ? computePaychecks(planner, {
+    scenario,
+    today
+  }) : paychecks, [scenarioActive, scenario, planner, paychecks, today]);
+  const altReservoir = useMemo(() => scenarioActive ? computeReservoirFor(altPaychecks) : reservoir, [scenarioActive, altPaychecks, reservoir, computeReservoirFor]);
+  const shownPaychecks = altPaychecks;
+  const shownReservoir = altReservoir;
+
+  /* per-month income for the projection charts */
+  const monthsFor = (pcs, year) => {
+    const thisM = today.slice(0, 7);
+    const out = [];
+    for (let m = 0; m < 12; m++) {
+      const key = `${year}-${plPad(m + 1)}`;
+      const actual = transactions.filter(t => t.type === "income" && (t.date || "").slice(0, 7) === key).reduce((s, t) => s + Number(t.amount || 0), 0);
+      let projected = 0;
+      if (key >= thisM) {
+        const inMonth = d => key === thisM ? d.slice(0, 7) <= thisM : d.slice(0, 7) === key; // overdue folds into this month
+        projected += pcs.filter(p => inMonth(p.payDate)).reduce((s, p) => s + p.net, 0);
+        projected += otherInflows.filter(f => inMonth(f.date)).reduce((s, f) => s + f.full, 0);
+      }
+      out.push({
+        key,
+        label: new Date(year, m, 1).toLocaleDateString(undefined, {
+          month: "short"
+        }).slice(0, 3),
+        actual: Math.round(actual * 100) / 100,
+        projected: Math.round(projected * 100) / 100,
+        isCurrent: key === thisM,
+        lean: key >= thisM && baselineMonthly > 0 && actual + projected < baselineMonthly
+      });
+    }
+    return out;
+  };
+  const months = monthsFor(shownPaychecks, projYear);
+  const summarize = (pcs, res) => {
+    const end = plAddDays(today, 365);
+    const next12 = [];
+    for (let m = 0; m < 12; m++) {
+      const d = new Date(Number(today.slice(0, 4)), Number(today.slice(5, 7)) - 1 + m, 1);
+      next12.push(`${d.getFullYear()}-${plPad(d.getMonth() + 1)}`);
+    }
+    const thisM = today.slice(0, 7);
+    const lean = baselineMonthly > 0 ? next12.filter(k => {
+      const inc = pcs.filter(p => k === thisM ? p.payDate.slice(0, 7) <= k : p.payDate.slice(0, 7) === k).reduce((s, p) => s + p.net, 0) + otherInflows.filter(f => k === thisM ? f.date.slice(0, 7) <= k : f.date.slice(0, 7) === k).reduce((s, f) => s + f.full, 0) + (k === thisM ? transactions.filter(t => t.type === "income" && (t.date || "").slice(0, 7) === k).reduce((s, t) => s + Number(t.amount || 0), 0) : 0);
+      return inc < baselineMonthly;
+    }).length : 0;
+    return {
+      income12: Math.round(pcs.filter(p => p.payDate <= end).reduce((s, p) => s + p.net, 0) * 100) / 100,
+      safe: res.safe.perMonth,
+      lean
+    };
+  };
+  const baseSummary = useMemo(() => summarize(paychecks, reservoir), [paychecks, reservoir, baselineMonthly, otherInflows, transactions]);
+  const altSummary = scenarioActive ? summarize(altPaychecks, altReservoir) : baseSummary;
+  const variance = useMemo(() => varianceByJob(payRecords), [payRecords]);
+
+  /* --- mutations (functional, so rapid taps never drop an update) --- */
+  const saveJob = job => {
+    setPlanner(p => ({
+      ...p,
+      jobs: p.jobs.some(j => j.id === job.id) ? p.jobs.map(j => j.id === job.id ? job : j) : [...p.jobs, job]
+    }));
+    setJobModal(null);
+  };
+  const deleteJob = id => {
+    setPlanner(p => ({
+      ...p,
+      jobs: p.jobs.filter(j => j.id !== id),
+      shifts: p.shifts.filter(s => s.jobId !== id)
+    }));
+    setJobModal(null);
+  };
+  const saveShifts = list => {
+    setPlanner(p => {
+      const ids = new Set(list.map(s => s.id));
+      const kept = p.shifts.filter(s => !ids.has(s.id));
+      return {
+        ...p,
+        shifts: [...kept, ...list]
+      };
+    });
+    setShiftModal(null);
+  };
+  const deleteShift = id => {
+    setPlanner(p => ({
+      ...p,
+      shifts: p.shifts.filter(s => s.id !== id)
+    }));
+    setShiftModal(null);
+  };
+  const toggleWorked = s => {
+    if (s.state === "paid") return;
+    setPlanner(p => ({
+      ...p,
+      shifts: p.shifts.map(x => x.id === s.id ? {
+        ...x,
+        state: x.state === "worked" ? "scheduled" : "worked"
+      } : x)
+    }));
+  };
+  /* shifts dated in the past that are still "scheduled" — one tap clears them */
+  const stale = shifts.filter(s => s.state === "scheduled" && shiftLastDay(s) < today);
+  const markStaleWorked = () => setPlanner(p => ({
+    ...p,
+    shifts: p.shifts.map(s => s.state === "scheduled" && shiftLastDay(s) < today ? {
+      ...s,
+      state: "worked"
+    } : s)
+  }));
+  const patchSettings = patch => setPlanner(p => ({
+    ...p,
+    settings: {
+      ...p.settings,
+      ...patch
+    }
+  }));
+  const newShift = (date, jobId) => {
+    const j = jobsById[jobId] || jobs[0];
+    if (!j) return;
+    const block = j.payType === "flat" && (j.flatUnit === "session" || j.flatUnit === "week");
+    setShiftModal({
+      isNew: true,
+      shift: {
+        id: uid(),
+        jobId: j.id,
+        date: date || today,
+        endDate: block ? plAddDays(date || today, 4) : "",
+        start: block ? "" : j.defaultStart || "09:00",
+        end: block ? "" : j.defaultEnd || "17:00",
+        state: (date || today) < today ? "worked" : "scheduled",
+        note: ""
+      }
+    });
+    setDaySheet(null);
+  };
+
+  /* --- empty state: nothing to plan until a job exists --- */
+  if (!jobs.length) {
+    return h("div", {
+      style: {
+        maxWidth: 680,
+        margin: "10px auto 0"
+      }
+    }, h("div", {
+      style: plCard({
+        padding: 22,
+        display: "flex",
+        flexDirection: "column",
+        gap: 12
+      })
+    }, h("div", {
+      style: {
+        fontFamily: "'Fraunces', serif",
+        fontSize: 22,
+        color: COLORS.paper
+      }
+    }, "Shift & Season Planner"), h("div", {
+      style: {
+        fontSize: 13.5,
+        color: COLORS.textDim,
+        lineHeight: 1.6
+      }
+    }, "Seasonal work fills the reservoir in lumps — camp in summer, the State Fair in August — while spending flows out all year. Add your jobs and shifts here and the planner works out when each paycheck actually lands, how full the reservoir will be, and how much you can safely spend each month."), h("div", {
+      style: {
+        fontSize: 12.5,
+        color: COLORS.textDim,
+        lineHeight: 1.6
+      }
+    }, "Each job can pay ", h("b", {
+      style: {
+        color: COLORS.text
+      }
+    }, "hourly"), " (Butterfly House style), a ", h("b", {
+      style: {
+        color: COLORS.text
+      }
+    }, "flat stipend"), " per shift, day, week, or session (camp style), or a ", h("b", {
+      style: {
+        color: COLORS.text
+      }
+    }, "hybrid"), ". Expected paychecks show up in Ledger's Expected income and forecast automatically."), h("div", null, h(PrimaryButton, {
+      onClick: () => setJobModal({
+        isNew: true,
+        job: plBlankJob(jobs, accounts, categories)
+      })
+    }, h(IconPlus, {
+      size: 15
+    }), " Add your first job"))), jobModal && h(Modal, {
+      title: "New job",
+      onClose: () => setJobModal(null),
+      wide: true
+    }, h(JobEditor, {
+      initial: jobModal.job,
+      isNew: true,
+      accounts,
+      categories,
+      shiftCount: 0,
+      onSave: saveJob,
+      onDelete: deleteJob,
+      onCancel: () => setJobModal(null)
+    })));
+  }
+  const upcoming = shownPaychecks.slice(0, 8);
+  const nextPay = paychecks.find(p => p.payDate >= today) || paychecks[0];
+  const restOfYear = paychecks.filter(p => p.payDate.slice(0, 4) === today.slice(0, 4)).reduce((s, p) => s + p.net, 0);
+  const safe = shownReservoir.safe;
+  const discretionaryHabit = Math.max(0, Math.round((baselineMonthly - shownReservoir.fixedMonthly) * 100) / 100);
+  const gapsAhead = shownReservoir.gaps.slice(0, 4);
+  const runway = shownReservoir.runway;
+  const calShifts = shifts;
+  const dayShifts = daySheet ? shifts.filter(s => shiftDays(s).includes(daySheet)) : [];
+  const stat = (label, value, sub, color, onClick) => h("div", {
+    onClick,
+    style: plCard({
+      flex: "1 1 160px",
+      padding: "13px 15px",
+      cursor: onClick ? "pointer" : "default"
+    })
+  }, h("div", {
+    style: {
+      fontSize: 10.5,
+      letterSpacing: .6,
+      textTransform: "uppercase",
+      color: COLORS.textDim
+    }
+  }, label), h("div", {
+    style: {
+      ...plMono,
+      fontSize: 21,
+      fontWeight: 600,
+      color: color || COLORS.text,
+      marginTop: 6
+    }
+  }, value), sub && h("div", {
+    style: {
+      fontSize: 11.5,
+      color: COLORS.textDim,
+      marginTop: 3,
+      lineHeight: 1.4
+    }
+  }, sub));
+  return h("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 16
+    }
+  }, scenarioActive && h("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 10,
+      flexWrap: "wrap",
+      fontSize: 12.5,
+      color: COLORS.gold,
+      background: `${COLORS.gold}14`,
+      border: `1px solid ${COLORS.gold}55`,
+      borderRadius: 10,
+      padding: "8px 12px"
+    }
+  }, h("span", {
+    style: {
+      flex: 1
+    }
+  }, "What-if active — projections below show the scenario, not your real schedule."), h(GhostButton, {
+    onClick: () => setScenario({}),
+    style: {
+      padding: "4px 9px",
+      fontSize: 11.5
+    }
+  }, "Reset")), h("div", {
+    style: {
+      display: "flex",
+      gap: 12,
+      flexWrap: "wrap"
+    }
+  }, stat("Safe to spend", `${fmtMoney(safe.perMonth)}/mo`, safe.perMonth < 0 ? `Short — scheduled income doesn't arrive in time before ${plShortDate(safe.bindingDate)}` : `on top of ${fmtMoney(shownReservoir.fixedMonthly)} fixed · tightest around ${plShortDate(safe.bindingDate)}${baselineMonthly > 0 ? ` · you've averaged ${fmtMoney(discretionaryHabit)}` : ""}`, safe.perMonth < 0 ? COLORS.rust : safe.perMonth < discretionaryHabit ? COLORS.gold : COLORS.sage), stat("Next paycheck", nextPay ? fmtMoney(nextPay.net) : "—", nextPay ? `${nextPay.jobName} · ${plShortDate(nextPay.payDate)} (${plRel(nextPay.payDate)})` : "Nothing scheduled", COLORS.text), stat(`Rest of ${today.slice(0, 4)}`, fmtMoney(restOfYear), `${paychecks.filter(p => p.payDate.slice(0, 4) === today.slice(0, 4)).length} paychecks from scheduled work`, COLORS.gold), runway && stat("Income runs out", runway.lastIncome ? plShortDate(runway.lastIncome) : "now", runway.daysLeft > 0 ? `then savings last ~${runway.daysLeft} days, to ${plShortDate(runway.runsOut)}, at ${fmtMoney(baselineMonthly)}/mo` : "savings won't cover baseline spending after that", runway.daysLeft < 60 ? COLORS.rust : COLORS.text)), (gapsAhead.length > 0 || stale.length > 0) && h("div", {
+    style: plCard({
+      display: "flex",
+      flexDirection: "column",
+      gap: 8
+    })
+  }, h("div", {
+    style: plLabel
+  }, "HEADS UP"), stale.length > 0 && h("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 10,
+      flexWrap: "wrap",
+      fontSize: 12.5,
+      color: COLORS.text
+    }
+  }, h("span", {
+    style: {
+      flex: 1
+    }
+  }, stale.length, " past shift", stale.length === 1 ? " is" : "s are", " still marked scheduled."), h(GhostButton, {
+    onClick: markStaleWorked,
+    style: {
+      padding: "4px 10px",
+      fontSize: 12
+    }
+  }, "Mark worked")), gapsAhead.map(g => h("div", {
+    key: g.from + g.to,
+    style: {
+      fontSize: 12.5,
+      lineHeight: 1.5,
+      color: g.shortfall > 0 ? COLORS.rust : COLORS.textDim
+    }
+  }, g.shortfall > 0 ? "⚠ " : "✓ ", g.fromLabel ? `${g.fromLabel} pays ${plShortDate(g.from)}` : `From today`, ", next income ", plShortDate(g.to), g.toLabel ? ` (${g.toLabel})` : "", ` — ${g.days} days. At your usual spending you'll need ~${fmtMoney(g.need)}; you're projected to have ${fmtMoney(g.have)}`, g.shortfall > 0 ? `, so you're short ${fmtMoney(g.shortfall)}.` : ", so you're covered."))), h("div", {
+    className: "pl-grid2"
+  }, h("div", {
+    style: plCard()
+  }, h("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      gap: 8,
+      marginBottom: 10,
+      flexWrap: "wrap"
+    }
+  }, h("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 6
+    }
+  }, h(IconBtn, {
+    onClick: () => setCal(c => c.m === 0 ? {
+      y: c.y - 1,
+      m: 11
+    } : {
+      y: c.y,
+      m: c.m - 1
+    }),
+    title: "Previous month"
+  }, "‹"), h("div", {
+    style: {
+      fontSize: 14,
+      color: COLORS.paper,
+      minWidth: 128,
+      textAlign: "center"
+    }
+  }, plMonthName(cal.y, cal.m)), h(IconBtn, {
+    onClick: () => setCal(c => c.m === 11 ? {
+      y: c.y + 1,
+      m: 0
+    } : {
+      y: c.y,
+      m: c.m + 1
+    }),
+    title: "Next month"
+  }, "›"), h("button", {
+    onClick: () => setCal({
+      y: Number(today.slice(0, 4)),
+      m: Number(today.slice(5, 7)) - 1
+    }),
+    style: {
+      background: "transparent",
+      border: "none",
+      color: COLORS.textDim,
+      fontSize: 11.5,
+      cursor: "pointer",
+      textDecoration: "underline",
+      textUnderlineOffset: 2
+    }
+  }, "today")), h(PrimaryButton, {
+    onClick: () => newShift(today),
+    style: {
+      padding: "7px 12px",
+      fontSize: 12.5
+    }
+  }, h(IconPlus, {
+    size: 14
+  }), " Shift")), h(PlannerCalendar, {
+    year: cal.y,
+    month: cal.m,
+    shifts: calShifts,
+    jobsById,
+    conflicts,
+    today,
+    onDay: d => setDaySheet(d),
+    onShift: s => setShiftModal({
+      isNew: false,
+      shift: s
+    })
+  }), h("div", {
+    style: {
+      display: "flex",
+      gap: 12,
+      flexWrap: "wrap",
+      marginTop: 10,
+      fontSize: 11,
+      color: COLORS.textDim
+    }
+  }, jobs.map(j => h("span", {
+    key: j.id,
+    style: {
+      display: "inline-flex",
+      alignItems: "center",
+      gap: 5
+    }
+  }, h("span", {
+    style: {
+      width: 9,
+      height: 9,
+      borderRadius: 2,
+      background: j.color
+    }
+  }), j.name)), h("span", null, "dashed = scheduled · solid = worked · ✓ = paid"))), h("div", {
+    style: plCard({
+      display: "flex",
+      flexDirection: "column",
+      gap: 10
+    })
+  }, h("div", {
+    style: plLabel
+  }, "UPCOMING PAYCHECKS", scenarioActive ? " · WHAT-IF" : ""), upcoming.length === 0 && h("div", {
+    style: {
+      fontSize: 12.5,
+      color: COLORS.textDim
+    }
+  }, "No paychecks expected — add shifts on the calendar."), upcoming.map(p => {
+    const overdue = p.payDate < today;
+    return h("div", {
+      key: p.id,
+      style: {
+        display: "flex",
+        alignItems: "center",
+        gap: 10,
+        background: COLORS.bg,
+        border: `1px solid ${overdue ? `${COLORS.gold}66` : COLORS.line}`,
+        borderRadius: 8,
+        padding: "8px 10px"
+      }
+    }, h("span", {
+      style: {
+        width: 4,
+        alignSelf: "stretch",
+        borderRadius: 2,
+        background: p.color
+      }
+    }), h("div", {
+      style: {
+        flex: 1,
+        minWidth: 0
+      }
+    }, h("div", {
+      style: {
+        fontSize: 12.5,
+        color: COLORS.text,
+        whiteSpace: "nowrap",
+        overflow: "hidden",
+        textOverflow: "ellipsis"
+      }
+    }, p.jobName), h("div", {
+      style: {
+        fontSize: 11,
+        color: overdue ? COLORS.gold : COLORS.textDim
+      }
+    }, plShortDate(p.payDate), " · ", overdue ? "should have arrived" : plRel(p.payDate), " · work ", plFmtRange(p.periodStart, p.periodEnd), p.hours ? ` · ${p.hours}h` : "", p.anyScheduled ? "" : " · all worked")), h("div", {
+      style: {
+        ...plMono,
+        fontSize: 13.5,
+        color: COLORS.sage,
+        fontWeight: 600
+      }
+    }, fmtMoney(p.net)), !scenarioActive && h(GhostButton, {
+      onClick: () => onConfirm(p),
+      style: {
+        padding: "4px 9px",
+        fontSize: 11.5,
+        borderColor: overdue ? `${COLORS.gold}88` : COLORS.line
+      }
+    }, "Received"));
+  }), shownPaychecks.length > upcoming.length && h("div", {
+    style: {
+      fontSize: 11.5,
+      color: COLORS.textDim
+    }
+  }, "+ ", shownPaychecks.length - upcoming.length, " more later"), payRecords.length > 0 && h("div", {
+    style: {
+      borderTop: `1px solid ${COLORS.line}`,
+      paddingTop: 10,
+      display: "flex",
+      flexDirection: "column",
+      gap: 6
+    }
+  }, h("div", {
+    style: plLabel
+  }, "RECEIVED PAY"), Object.entries(variance).map(([jid, v]) => h("div", {
+    key: jid,
+    style: {
+      fontSize: 11.5,
+      color: COLORS.textDim
+    }
+  }, (jobsById[jid] || {
+    name: "Removed job"
+  }).name, ": ", Math.abs(v.avgPct) < 1.5 ? `estimates within ${Math.abs(v.avgPct)}%` : v.avgPct > 0 ? `paid ${v.avgPct}% more than estimated` : `paid ${-v.avgPct}% less than estimated`, ` over ${v.n} paycheck${v.n === 1 ? "" : "s"}`)), payRecords.slice(0, 5).map(r => {
+    const d = Math.round((r.actual - r.expected) * 100) / 100;
+    const missing = txIds && !txIds.has(r.txId);
+    return h("div", {
+      key: r.id,
+      style: {
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        fontSize: 12
+      }
+    }, h("span", {
+      style: {
+        width: 8,
+        height: 8,
+        borderRadius: "50%",
+        background: (jobsById[r.jobId] || {}).color || COLORS.textDim
+      }
+    }), h("span", {
+      style: {
+        flex: 1,
+        color: COLORS.textDim,
+        minWidth: 0
+      }
+    }, plShortDate(r.receivedDate), " · ", (jobsById[r.jobId] || {
+      name: "Removed job"
+    }).name, missing ? " · ledger entry deleted" : ""), h("span", {
+      style: {
+        ...plMono,
+        color: COLORS.text
+      }
+    }, fmtMoney(r.actual)), h("span", {
+      style: {
+        ...plMono,
+        fontSize: 11,
+        width: 62,
+        textAlign: "right",
+        color: Math.abs(d) < .01 ? COLORS.textDim : d > 0 ? COLORS.sage : COLORS.rust
+      }
+    }, Math.abs(d) < .01 ? "±0" : `${d > 0 ? "+" : "−"}${fmtMoney(Math.abs(d))}`), h("button", {
+      onClick: () => {
+        if (window.confirm("Undo this paycheck? Its Ledger income entry is removed and the shifts go back to unpaid.")) onUndo(r);
+      },
+      title: "Undo",
+      style: {
+        background: "transparent",
+        border: "none",
+        color: COLORS.textDim,
+        cursor: "pointer",
+        fontSize: 11,
+        textDecoration: "underline"
+      }
+    }, "undo"));
+  })))), h("div", {
+    style: plCard()
+  }, h("div", {
+    style: {
+      ...plLabel,
+      marginBottom: 10
+    }
+  }, "SEASONS ", projYear), h(PlannerYearStrip, {
+    year: projYear,
+    jobs,
+    shifts,
+    today
+  })), h("div", {
+    className: "pl-grid2"
+  }, h("div", {
+    style: plCard()
+  }, h("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      marginBottom: 8,
+      gap: 8,
+      flexWrap: "wrap"
+    }
+  }, h("div", {
+    style: plLabel
+  }, "INCOME BY MONTH", scenarioActive ? " · WHAT-IF" : ""), h("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 4
+    }
+  }, h(IconBtn, {
+    onClick: () => setProjYear(y => y - 1),
+    title: "Previous year"
+  }, "‹"), h("span", {
+    style: {
+      ...plMono,
+      fontSize: 12.5,
+      color: COLORS.paper
+    }
+  }, projYear), h(IconBtn, {
+    onClick: () => setProjYear(y => y + 1),
+    title: "Next year"
+  }, "›"))), h(PlannerMonthChart, {
+    months,
+    baseline: baselineMonthly
+  }), h("div", {
+    style: {
+      display: "flex",
+      gap: 14,
+      flexWrap: "wrap",
+      fontSize: 11.5,
+      color: COLORS.textDim,
+      marginTop: 6
+    }
+  }, h("span", null, h("span", {
+    style: {
+      display: "inline-block",
+      width: 10,
+      height: 10,
+      background: COLORS.sage,
+      borderRadius: 2,
+      verticalAlign: "middle",
+      marginRight: 5
+    }
+  }), "received"), h("span", null, h("span", {
+    style: {
+      display: "inline-block",
+      width: 10,
+      height: 10,
+      background: `${COLORS.gold}55`,
+      border: `1px dashed ${COLORS.gold}`,
+      borderRadius: 2,
+      verticalAlign: "middle",
+      marginRight: 5
+    }
+  }), "expected"), baselineMonthly > 0 && h("span", {
+    style: {
+      color: COLORS.rust
+    }
+  }, "● lean month (under baseline)"))), h("div", {
+    style: plCard()
+  }, h("div", {
+    style: {
+      ...plLabel,
+      marginBottom: 8
+    }
+  }, "CUMULATIVE ", projYear), h(PlannerCumulativeChart, {
+    months,
+    baseline: baselineMonthly
+  }))), h("div", {
+    className: "pl-grid2"
+  }, h("div", {
+    style: plCard({
+      display: "flex",
+      flexDirection: "column",
+      gap: 10
+    })
+  }, h("div", {
+    style: {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      gap: 8
+    }
+  }, h("div", {
+    style: plLabel
+  }, "JOBS"), h(GhostButton, {
+    onClick: () => setJobModal({
+      isNew: true,
+      job: plBlankJob(jobs, accounts, categories)
+    }),
+    style: {
+      padding: "5px 10px",
+      fontSize: 12
+    }
+  }, h(IconPlus, {
+    size: 13
+  }), " Job")), jobs.map(j => h("div", {
+    key: j.id,
+    onClick: () => setJobModal({
+      isNew: false,
+      job: j
+    }),
+    style: {
+      display: "flex",
+      gap: 10,
+      alignItems: "center",
+      background: COLORS.bg,
+      border: `1px solid ${COLORS.line}`,
+      borderRadius: 8,
+      padding: "9px 11px",
+      cursor: "pointer"
+    }
+  }, h("span", {
+    style: {
+      width: 10,
+      height: 10,
+      borderRadius: "50%",
+      background: j.color,
+      flexShrink: 0
+    }
+  }), h("div", {
+    style: {
+      minWidth: 0,
+      flex: 1
+    }
+  }, h("div", {
+    style: {
+      fontSize: 13,
+      color: COLORS.text
+    }
+  }, j.name), h("div", {
+    style: {
+      fontSize: 11.5,
+      color: COLORS.textDim,
+      lineHeight: 1.4
+    }
+  }, plJobSummary(j, accounts))), h(IconPencil, {
+    size: 13,
+    style: {
+      color: COLORS.textDim
+    }
+  })))), h("div", {
+    style: plCard({
+      display: "flex",
+      flexDirection: "column",
+      gap: 10
+    })
+  }, h("button", {
+    onClick: () => setShowWhatIf(v => !v),
+    style: {
+      background: "transparent",
+      border: "none",
+      padding: 0,
+      textAlign: "left",
+      cursor: "pointer",
+      ...plLabel
+    }
+  }, showWhatIf ? "▾ " : "▸ ", "WHAT IF…"), showWhatIf ? h(PlannerWhatIf, {
+    jobs,
+    shifts,
+    scenario,
+    setScenario,
+    today,
+    base: baseSummary,
+    alt: altSummary
+  }) : h("div", {
+    style: {
+      fontSize: 12.5,
+      color: COLORS.textDim
+    }
+  }, "Try extra hours, a different rate, or dropping a session, and see what it does to the year before committing."), h("button", {
+    onClick: () => setShowSettings(v => !v),
+    style: {
+      background: "transparent",
+      border: "none",
+      padding: 0,
+      textAlign: "left",
+      cursor: "pointer",
+      marginTop: 6,
+      ...plLabel
+    }
+  }, showSettings ? "▾ " : "▸ ", "PLANNER SETTINGS"), showSettings && h("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 10
+    }
+  }, h("div", {
+    style: {
+      display: "flex",
+      gap: 10,
+      flexWrap: "wrap",
+      alignItems: "flex-end"
+    }
+  }, h(Field, {
+    label: "Baseline spending ($/mo)"
+  }, h("input", {
+    type: "number",
+    step: "1",
+    min: "0",
+    placeholder: suggestedBaseline ? `${Math.round(suggestedBaseline)} (your recent average)` : "",
+    value: settings.baselineMonthly ?? "",
+    onChange: e => patchSettings({
+      baselineMonthly: e.target.value === "" ? null : Number(e.target.value)
+    }),
+    style: inputStyle
+  })), h(Field, {
+    label: "Keep at least ($)"
+  }, h("input", {
+    type: "number",
+    step: "1",
+    min: "0",
+    value: settings.bufferMin ?? 0,
+    onChange: e => patchSettings({
+      bufferMin: Number(e.target.value) || 0
+    }),
+    style: inputStyle
+  })), h(Field, {
+    label: "Flag income gaps of (days)"
+  }, h("input", {
+    type: "number",
+    step: "1",
+    min: "3",
+    value: settings.gapDays ?? 21,
+    onChange: e => patchSettings({
+      gapDays: Math.max(3, Number(e.target.value) || 21)
+    }),
+    style: inputStyle
+  }))), h("div", {
+    style: {
+      fontSize: 11.5,
+      color: COLORS.textDim,
+      lineHeight: 1.5
+    }
+  }, "Baseline spending drives lean-month and gap warnings; leave it blank to use your last three months' average (", fmtMoney(suggestedBaseline), "). Safe-to-spend never lets the reservoir dip below \"keep at least\".")))), daySheet && h(Modal, {
+    title: plLongDate(daySheet),
+    onClose: () => setDaySheet(null)
+  }, h("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 8
+    }
+  }, dayShifts.length === 0 && h("div", {
+    style: {
+      fontSize: 12.5,
+      color: COLORS.textDim
+    }
+  }, "Nothing scheduled."), dayShifts.map(s => {
+    const j = jobsById[s.jobId] || {
+      name: "?",
+      color: COLORS.textDim
+    };
+    const est = shiftAccruals(s, j).filter(a => a.date === daySheet).reduce((t, a) => t + a.amount, 0);
+    return h("div", {
+      key: s.id,
+      style: {
+        display: "flex",
+        alignItems: "center",
+        gap: 10,
+        background: COLORS.bg,
+        border: `1px solid ${conflicts.ids.has(s.id) ? COLORS.rust : COLORS.line}`,
+        borderRadius: 8,
+        padding: "9px 10px"
+      }
+    }, h("span", {
+      style: {
+        width: 4,
+        alignSelf: "stretch",
+        borderRadius: 2,
+        background: j.color
+      }
+    }), h("div", {
+      style: {
+        flex: 1,
+        minWidth: 0,
+        cursor: "pointer"
+      },
+      onClick: () => {
+        setDaySheet(null);
+        setShiftModal({
+          isNew: false,
+          shift: s
+        });
+      }
+    }, h("div", {
+      style: {
+        fontSize: 13,
+        color: COLORS.text
+      }
+    }, j.name, conflicts.ids.has(s.id) ? " ⚠" : ""), h("div", {
+      style: {
+        fontSize: 11.5,
+        color: COLORS.textDim
+      }
+    }, plShiftTimeLabel(s), s.endDate && s.endDate > s.date ? ` · ${plFmtRange(s.date, s.endDate)}` : "", ` · ≈ ${fmtMoney(est)}`, s.note ? ` · ${s.note}` : "")), h("button", {
+      onClick: () => toggleWorked(s),
+      disabled: s.state === "paid",
+      title: s.state === "paid" ? "Paid" : "Tap to toggle scheduled / worked",
+      style: {
+        background: `${PL_STATE_COLOR[s.state]}22`,
+        color: PL_STATE_COLOR[s.state],
+        border: `1px solid ${PL_STATE_COLOR[s.state]}66`,
+        borderRadius: 20,
+        padding: "3px 10px",
+        fontSize: 11.5,
+        cursor: s.state === "paid" ? "default" : "pointer"
+      }
+    }, s.state === "paid" ? "paid ✓" : s.state));
+  }), h("div", {
+    style: {
+      display: "flex",
+      gap: 8,
+      flexWrap: "wrap",
+      marginTop: 4
+    }
+  }, jobs.map(j => h(GhostButton, {
+    key: j.id,
+    onClick: () => newShift(daySheet, j.id),
+    style: {
+      padding: "6px 11px",
+      fontSize: 12,
+      borderColor: `${j.color}88`
+    }
+  }, h(IconPlus, {
+    size: 12
+  }), " ", j.name))))), shiftModal && h(Modal, {
+    title: shiftModal.isNew ? "Add shift" : "Edit shift",
+    onClose: () => setShiftModal(null),
+    wide: true
+  }, h(ShiftEditor, {
+    initial: shiftModal.shift,
+    isNew: shiftModal.isNew,
+    jobs,
+    conflictIds: conflicts.ids,
+    onSave: saveShifts,
+    onDelete: deleteShift,
+    onCancel: () => setShiftModal(null)
+  })), jobModal && h(Modal, {
+    title: jobModal.isNew ? "New job" : `Edit ${jobModal.job.name}`,
+    onClose: () => setJobModal(null),
+    wide: true
+  }, h(JobEditor, {
+    initial: jobModal.job,
+    isNew: jobModal.isNew,
+    accounts,
+    categories,
+    shiftCount: shifts.filter(s => s.jobId === jobModal.job.id).length,
+    onSave: saveJob,
+    onDelete: deleteJob,
+    onCancel: () => setJobModal(null)
+  })));
+}
+
+/* ================= CLOUD SYNC — a private GitHub repo as the shared copy =================
+   Each device keeps working from its own localStorage (fast, works offline);
+   this layer keeps a JSON file in a PRIVATE GitHub repo in step with it.
+
+   How it stays safe with two devices:
+   • Every successful sync stores a "base" — the exact data both sides agreed
+     on, plus the file's git sha.
+   • On sync we pull. If the remote sha still equals our base, only we changed
+     → push. If only the remote changed → adopt it. If BOTH changed → three-way
+     merge per record against the base: whoever changed a record wins; a record
+     deleted on one side and untouched on the other is deleted; edited on both
+     sides → this device wins (counted and reported). Pushes send the sha we
+     merged against, so a third concurrent write is caught (409) and re-merged.
+   • Unknown top-level fields from a newer app version are carried along
+     untouched, and a newer schema pauses sync instead of risking a downgrade.
+   • Public repos are refused outright — this is financial data. */
+const CLOUD_CFG_KEY = "ledger_cloud_v1";
+const CLOUD_BASE_KEY = "ledger_cloud_base_v1";
+const SYNC_SCHEMA = 1;
+const GH_API = "https://api.github.com";
+const loadCloudCfg = () => {
+  try {
+    const r = localStorage.getItem(CLOUD_CFG_KEY);
+    return r ? JSON.parse(r) : null;
+  } catch {
+    return null;
+  }
+};
+const saveCloudCfg = cfg => {
+  try {
+    if (cfg) localStorage.setItem(CLOUD_CFG_KEY, JSON.stringify(cfg));else localStorage.removeItem(CLOUD_CFG_KEY);
+  } catch (e) {
+    console.error("save failed", e);
+  }
+};
+const loadCloudBase = () => {
+  try {
+    const r = localStorage.getItem(CLOUD_BASE_KEY);
+    return r ? JSON.parse(r) : null;
+  } catch {
+    return null;
+  }
+};
+const saveCloudBase = base => {
+  try {
+    if (base) localStorage.setItem(CLOUD_BASE_KEY, JSON.stringify(base));else localStorage.removeItem(CLOUD_BASE_KEY);
+  } catch (e) {
+    console.error("save failed", e);
+  }
+};
+const cloudReady = cfg => !!(cfg && cfg.owner && cfg.repo && cfg.token);
+const guessDeviceName = () => {
+  const ua = typeof navigator !== "undefined" ? navigator.userAgent || "" : "";
+  return /iPhone/.test(ua) ? "iPhone" : /iPad/.test(ua) ? "iPad" : /Macintosh|Mac OS X/.test(ua) ? "Mac" : "This device";
+};
+
+/* Deterministic JSON (sorted keys) so equality checks don't depend on the
+   order fields happened to be written in. */
+const stableStringify = v => {
+  if (v === null || typeof v !== "object") return JSON.stringify(v === undefined ? null : v);
+  if (Array.isArray(v)) return "[" + v.map(stableStringify).join(",") + "]";
+  return "{" + Object.keys(v).filter(k => v[k] !== undefined).sort().map(k => JSON.stringify(k) + ":" + stableStringify(v[k])).join(",") + "}";
+};
+const sameJSON = (a, b) => stableStringify(a) === stableStringify(b);
+
+/* What gets synced, and how each piece merges. Lists merge record-by-record
+   by key; maps merge key-by-key. */
+const SYNC_LISTS = {
+  transactions: x => x.id,
+  accounts: x => x.id,
+  categories: x => x.name,
+  recurring: x => x.id,
+  planned: x => x.id,
+  projected: x => x.id,
+  importRules: x => `${x.match}|${x.category}`
+};
+const SYNC_MAPS = ["budgets", "budgetSettings"];
+const PLANNER_LISTS = {
+  jobs: x => x.id,
+  shifts: x => x.id,
+  payRecords: x => x.id
+};
+const SYNC_KNOWN = [...Object.keys(SYNC_LISTS), ...SYNC_MAPS, "planner"];
+/* Normalize both sides the same way before comparing, so defaults filled in
+   on load don't register as edits and trigger pointless pushes. */
+const normalizeSyncData = d => {
+  const out = {
+    ...(d || {})
+  };
+  Object.keys(SYNC_LISTS).forEach(k => {
+    out[k] = Array.isArray(out[k]) ? out[k] : [];
+  });
+  out.budgets = out.budgets && typeof out.budgets === "object" ? out.budgets : {};
+  out.budgetSettings = {
+    ...DEFAULT_BUDGET_SETTINGS,
+    ...(out.budgetSettings || {}),
+    perCategory: out.budgetSettings && out.budgetSettings.perCategory || {}
+  };
+  out.planner = normalizePlanner(out.planner);
+  return out;
+};
+const syncDataEqual = (a, b) => {
+  const x = normalizeSyncData(a),
+    y = normalizeSyncData(b);
+  return SYNC_KNOWN.every(k => sameJSON(x[k], y[k]));
+};
+const syncEntryCount = d => {
+  const n = normalizeSyncData(d);
+  return n.transactions.length + n.planner.shifts.length;
+};
+
+/* ---- three-way merge ---- */
+const mergeList3 = (base, local, remote, keyFn, stats) => {
+  const B = new Map((base || []).map(x => [keyFn(x), x]));
+  const L = new Map((local || []).map(x => [keyFn(x), x]));
+  const R = new Map((remote || []).map(x => [keyFn(x), x]));
+  const decide = k => {
+    const inB = B.has(k),
+      inL = L.has(k),
+      inR = R.has(k);
+    const b = B.get(k),
+      l = L.get(k),
+      r = R.get(k);
+    if (inL && inR) {
+      if (sameJSON(l, r)) return l;
+      if (inB && sameJSON(l, b)) return r; // only the other device changed it
+      if (inB && sameJSON(r, b)) return l; // only this device changed it
+      stats.conflicts++;
+      return l; // both changed → this device wins
+    }
+    if (inL) return inB && sameJSON(l, b) ? undefined : l; // deleted remotely (unless edited here)
+    if (inR) return inB && sameJSON(r, b) ? undefined : r; // deleted here (unless edited remotely)
+    return undefined;
+  };
+  const out = [];
+  const seen = new Set();
+  [...(local || []), ...(remote || [])].forEach(x => {
+    const k = keyFn(x);
+    if (seen.has(k)) return;
+    seen.add(k);
+    const v = decide(k);
+    if (v !== undefined) out.push(v);
+  });
+  return out;
+};
+const mergeMap3 = (base, local, remote, stats) => {
+  const b = base || {},
+    l = local || {},
+    r = remote || {};
+  const out = {};
+  new Set([...Object.keys(l), ...Object.keys(r), ...Object.keys(b)]).forEach(k => {
+    const inB = k in b,
+      inL = k in l,
+      inR = k in r;
+    let v;
+    if (inL && inR) {
+      if (sameJSON(l[k], r[k])) v = l[k];else if (inB && sameJSON(l[k], b[k])) v = r[k];else if (inB && sameJSON(r[k], b[k])) v = l[k];else {
+        stats.conflicts++;
+        v = l[k];
+      }
+    } else if (inL) v = inB && sameJSON(l[k], b[k]) ? undefined : l[k];else if (inR) v = inB && sameJSON(r[k], b[k]) ? undefined : r[k];
+    if (v !== undefined) out[k] = v;
+  });
+  return out;
+};
+const mergeSyncData = (base, local, remote, stats = {
+  conflicts: 0
+}) => {
+  const B = normalizeSyncData(base),
+    L = normalizeSyncData(local),
+    R = normalizeSyncData(remote);
+  const out = {};
+  Object.entries(SYNC_LISTS).forEach(([k, keyFn]) => {
+    out[k] = mergeList3(B[k], L[k], R[k], keyFn, stats);
+  });
+  SYNC_MAPS.forEach(k => {
+    out[k] = mergeMap3(B[k], L[k], R[k], stats);
+  });
+  out.planner = {
+    ...Object.fromEntries(Object.entries(PLANNER_LISTS).map(([k, keyFn]) => [k, mergeList3(B.planner[k], L.planner[k], R.planner[k], keyFn, stats)])),
+    settings: mergeMap3(B.planner.settings, L.planner.settings, R.planner.settings, stats)
+  };
+  /* carry along anything a newer app version added that this one doesn't know */
+  Object.keys(R).forEach(k => {
+    if (!SYNC_KNOWN.includes(k)) out[k] = R[k];
+  });
+  return out;
+};
+
+/* ---- GitHub REST (contents API) ---- */
+const b64encodeUtf8 = str => {
+  const bytes = new TextEncoder().encode(str);
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+};
+const b64decodeUtf8 = b64 => {
+  const bin = atob(String(b64).replace(/\s/g, ""));
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new TextDecoder().decode(bytes);
+};
+const syncError = (kind, message) => Object.assign(new Error(message), {
+  kind
+});
+const ghRequest = async (cfg, path, init = {}) => {
+  let res;
+  try {
+    res = await fetch(`${GH_API}${path}`, {
+      ...init,
+      cache: "no-store",
+      headers: {
+        Authorization: `Bearer ${cfg.token}`,
+        Accept: "application/vnd.github+json",
+        ...(init.headers || {})
+      }
+    });
+  } catch {
+    throw syncError("offline", "Can't reach GitHub — offline? Will retry.");
+  }
+  if (res.status === 401) throw syncError("auth", "GitHub rejected the token — it may have expired or been revoked. Paste a new one in Sync settings.");
+  if (res.status === 403 && res.headers && res.headers.get && res.headers.get("x-ratelimit-remaining") === "0") throw syncError("rate", "GitHub rate limit reached — sync will resume shortly.");
+  if (res.status === 403) throw syncError("auth", "The token doesn't have permission for this repo. It needs Contents: Read and write.");
+  return res;
+};
+const ghRepoPath = cfg => `/repos/${encodeURIComponent(cfg.owner.trim())}/${encodeURIComponent(cfg.repo.trim())}`;
+const ghFilePath = cfg => `${ghRepoPath(cfg)}/contents/${(cfg.path || "ledger-sync.json").split("/").map(encodeURIComponent).join("/")}`;
+const ghCheckRepo = async cfg => {
+  const res = await ghRequest(cfg, ghRepoPath(cfg));
+  if (res.status === 404) throw syncError("notfound", "Repo not found — check the owner and name, and that the token was given access to this repo.");
+  if (!res.ok) throw syncError("http", `GitHub returned an error (${res.status}).`);
+  const j = await res.json();
+  if (!j.private) throw syncError("public", "That repo is public — anyone could read your finances. Sync only works with a private repo.");
+  if (j.permissions && j.permissions.push === false) throw syncError("auth", "The token can read this repo but not write to it. Give it Contents: Read and write.");
+  return j;
+};
+const ghGetFile = async cfg => {
+  const res = await ghRequest(cfg, `${ghFilePath(cfg)}?ref=${encodeURIComponent(cfg.branch || "main")}`);
+  if (res.status === 404) return {
+    exists: false
+  };
+  if (!res.ok) throw syncError("http", `GitHub returned an error (${res.status}).`);
+  const j = await res.json();
+  let text;
+  if (j.content && j.encoding === "base64") text = b64decodeUtf8(j.content);else {
+    /* files over 1 MB come back without content — fetch the blob instead */
+    const br = await ghRequest(cfg, `${ghRepoPath(cfg)}/git/blobs/${j.sha}`);
+    if (!br.ok) throw syncError("http", `GitHub returned an error (${br.status}).`);
+    text = b64decodeUtf8((await br.json()).content);
+  }
+  let doc;
+  try {
+    doc = JSON.parse(text);
+  } catch {
+    throw syncError("corrupt", "The synced file isn't valid JSON — it may have been edited by hand on GitHub.");
+  }
+  return {
+    exists: true,
+    sha: j.sha,
+    doc
+  };
+};
+const ghPutFile = async (cfg, doc, sha, message) => {
+  const body = {
+    message,
+    content: b64encodeUtf8(JSON.stringify(doc)),
+    branch: cfg.branch || "main"
+  };
+  if (sha) body.sha = sha;
+  const res = await ghRequest(cfg, ghFilePath(cfg), {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(body)
+  });
+  /* 409 = the sha moved (another device just pushed); 422 is what GitHub sends
+     when a file appeared after we thought it didn't exist. Both mean "re-pull". */
+  if (res.status === 409 || res.status === 422) throw syncError("conflict", "Another device synced at the same moment.");
+  if (!res.ok) throw syncError("http", `GitHub returned an error (${res.status}).`);
+  const j = await res.json();
+  return j.content.sha;
+};
+const makeSyncDoc = (data, deviceName) => ({
+  app: "ledger-sync",
+  schema: SYNC_SCHEMA,
+  updatedAt: new Date().toISOString(),
+  updatedBy: deviceName || "",
+  data
+});
+
+/* ---- the hook ----
+   getData(): latest synced data from React state (read through a ref so an
+   async sync never works from a stale snapshot). applyData(d): write data
+   into state + localStorage. */
+function useCloudSync({
+  loaded,
+  getData,
+  applyData,
+  changeKey
+}) {
+  const [cfg, setCfg] = useState(() => loadCloudCfg());
+  const [status, setStatus] = useState(() => ({
+    state: cloudReady(loadCloudCfg()) ? "idle" : "off",
+    message: "",
+    at: (loadCloudBase() || {}).syncedAt || ""
+  }));
+  const [join, setJoin] = useState(null);
+  const [, setTick] = useState(0);
+  const busy = useRef(false);
+  const pending = useRef(false);
+  const timer = useRef(null);
+  const lastAuto = useRef(0);
+  const cfgRef = useRef(cfg);
+  cfgRef.current = cfg;
+  const finish = (data, sha, message) => {
+    const at = new Date().toISOString();
+    saveCloudBase({
+      data: normalizeSyncData(data),
+      sha,
+      syncedAt: at
+    });
+    setStatus({
+      state: "ok",
+      message: message || "",
+      at
+    });
+  };
+  const run = useCallback(async (reason, choice) => {
+    const c = cfgRef.current;
+    if (!cloudReady(c)) return;
+    if (busy.current) {
+      pending.current = true;
+      return;
+    }
+    busy.current = true;
+    setStatus(s => ({
+      ...s,
+      state: "syncing"
+    }));
+    const device = c.deviceName || guessDeviceName();
+    const msg = `Sync from ${device}`;
+    try {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const remote = await ghGetFile(c);
+        const local = normalizeSyncData(getData());
+        const base = loadCloudBase();
+        if (remote.exists && Number(remote.doc.schema || 0) > SYNC_SCHEMA) {
+          setStatus({
+            state: "outdated",
+            message: `${remote.doc.updatedBy || "Another device"} is running a newer Ledger. Publish/refresh the newest version here to keep syncing.`,
+            at: (base || {}).syncedAt || ""
+          });
+          return;
+        }
+        if (!remote.exists) {
+          const sha = await ghPutFile(c, makeSyncDoc(local, device), null, `${msg} (first upload)`);
+          finish(local, sha, "Uploaded this device's data — other devices can now connect.");
+          return;
+        }
+        const remoteData = remote.doc.data || {};
+        if (!base || choice) {
+          /* This device has never synced with this file. If either side is
+             empty, or they already match, nothing to decide — otherwise ask. */
+          const decision = choice || (syncDataEqual(local, remoteData) ? "same" : syncEntryCount(local) === 0 ? "remote" : null);
+          if (!decision) {
+            setJoin({
+              localCount: syncEntryCount(local),
+              remoteCount: syncEntryCount(remoteData),
+              remoteBy: remote.doc.updatedBy || "",
+              remoteAt: remote.doc.updatedAt || ""
+            });
+            setStatus(s => ({
+              ...s,
+              state: "choice"
+            }));
+            return;
+          }
+          setJoin(null);
+          if (decision === "same") {
+            finish(remoteData, remote.sha, "Connected — both copies already matched.");
+            return;
+          }
+          if (decision === "remote") {
+            applyData(normalizeSyncData(remoteData));
+            finish(remoteData, remote.sha, `Loaded the synced copy${remote.doc.updatedBy ? ` from ${remote.doc.updatedBy}` : ""}.`);
+            return;
+          }
+          const next = decision === "combine" ? mergeSyncData({}, local, remoteData) : local;
+          if (decision === "combine") applyData(next);
+          try {
+            const sha = await ghPutFile(c, makeSyncDoc(next, device), remote.sha, `${msg} (${decision === "combine" ? "combined" : "replaced"})`);
+            finish(next, sha, decision === "combine" ? "Combined both copies." : "Replaced the synced copy with this device's data.");
+            return;
+          } catch (e) {
+            if (e.kind === "conflict") continue;
+            throw e;
+          }
+        }
+        const dirty = !syncDataEqual(local, base.data);
+        if (remote.sha === base.sha) {
+          if (!dirty) {
+            finish(local, remote.sha, "");
+            return;
+          }
+          try {
+            const sha = await ghPutFile(c, makeSyncDoc({
+              ...remoteData,
+              ...local
+            }, device), remote.sha, msg);
+            finish(local, sha, "");
+            return;
+          } catch (e) {
+            if (e.kind === "conflict") continue;
+            throw e;
+          }
+        }
+        /* the other device has synced since we last did */
+        if (!dirty) {
+          applyData(normalizeSyncData(remoteData));
+          finish(remoteData, remote.sha, `Pulled changes from ${remote.doc.updatedBy || "another device"}.`);
+          return;
+        }
+        const stats = {
+          conflicts: 0
+        };
+        const merged = mergeSyncData(base.data, local, remoteData, stats);
+        applyData(normalizeSyncData(merged));
+        try {
+          const sha = await ghPutFile(c, makeSyncDoc(merged, device), remote.sha, `${msg} (merged)`);
+          finish(merged, sha, stats.conflicts ? `Merged with ${remote.doc.updatedBy || "another device"} — ${stats.conflicts} item${stats.conflicts === 1 ? " was" : "s were"} edited on both; kept this device's version.` : `Merged changes from ${remote.doc.updatedBy || "another device"}.`);
+          return;
+        } catch (e) {
+          if (e.kind === "conflict") continue;
+          throw e;
+        }
+      }
+      throw syncError("conflict", "Kept colliding with another device's sync — will retry.");
+    } catch (e) {
+      setStatus(s => ({
+        ...s,
+        state: e.kind === "offline" || e.kind === "rate" || e.kind === "conflict" ? "retry" : "error",
+        message: e.message || "Sync failed."
+      }));
+      if (e.kind === "offline" || e.kind === "rate" || e.kind === "conflict") {
+        clearTimeout(timer.current);
+        timer.current = setTimeout(() => run("retry"), 60000);
+      }
+    } finally {
+      busy.current = false;
+      if (pending.current) {
+        pending.current = false;
+        clearTimeout(timer.current);
+        timer.current = setTimeout(() => run("queued"), 500);
+      }
+    }
+  }, [getData, applyData]);
+
+  /* open: sync once data has loaded */
+  useEffect(() => {
+    if (loaded && cloudReady(cfgRef.current)) run("open");
+  }, [loaded]);
+  /* any local change: push after a short pause (only if something actually changed) */
+  useEffect(() => {
+    if (!loaded || !cloudReady(cfgRef.current)) return;
+    const base = loadCloudBase();
+    if (base && syncDataEqual(getData(), base.data)) return;
+    clearTimeout(timer.current);
+    timer.current = setTimeout(() => run("change"), 3500);
+  }, [changeKey, loaded]);
+  /* coming back to the app (switching from the other device): pull */
+  useEffect(() => {
+    const onVis = () => {
+      if (!cloudReady(cfgRef.current)) return;
+      const now = Date.now();
+      if (document.visibilityState === "visible") {
+        if (now - lastAuto.current > 15000) {
+          lastAuto.current = now;
+          run("focus");
+        }
+      } else {
+        const base = loadCloudBase();
+        if (!base || !syncDataEqual(getData(), base.data)) run("hide"); // best effort before iOS suspends us
+      }
+    };
+    document.addEventListener("visibilitychange", onVis);
+    window.addEventListener("focus", onVis);
+    const iv = setInterval(() => setTick(t => t + 1), 60000);
+    return () => {
+      document.removeEventListener("visibilitychange", onVis);
+      window.removeEventListener("focus", onVis);
+      clearInterval(iv);
+    };
+  }, [run, getData]);
+  const connect = async next => {
+    const c = {
+      branch: "main",
+      path: "ledger-sync.json",
+      ...next,
+      owner: String(next.owner || "").trim(),
+      repo: String(next.repo || "").trim(),
+      token: String(next.token || "").trim()
+    };
+    setStatus(s => ({
+      ...s,
+      state: "syncing",
+      message: "Checking the repo…"
+    }));
+    try {
+      await ghCheckRepo(c);
+    } catch (e) {
+      setStatus(s => ({
+        ...s,
+        state: "error",
+        message: e.message
+      }));
+      return false;
+    }
+    const prev = cfgRef.current;
+    /* a different repo/file means a different shared copy — forget the old base */
+    if (!prev || prev.owner !== c.owner || prev.repo !== c.repo || (prev.path || "") !== (c.path || "") || (prev.branch || "") !== (c.branch || "")) saveCloudBase(null);
+    saveCloudCfg(c);
+    cfgRef.current = c;
+    setCfg(c);
+    await run("connect");
+    return true;
+  };
+  const disconnect = () => {
+    saveCloudCfg(null);
+    saveCloudBase(null);
+    cfgRef.current = null;
+    setCfg(null);
+    setJoin(null);
+    clearTimeout(timer.current);
+    setStatus({
+      state: "off",
+      message: "",
+      at: ""
+    });
+  };
+  const resolveJoin = choice => run("join", choice);
+  return {
+    cfg,
+    status,
+    join,
+    connect,
+    disconnect,
+    resolveJoin,
+    syncNow: () => run("manual")
+  };
+}
+
+/* ---- sync settings + first-connection choice ---- */
+const timeAgo = iso => {
+  if (!iso) return "";
+  const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
+  if (s < 50) return "just now";
+  if (s < 3600) return `${Math.round(s / 60)}m ago`;
+  if (s < 86400) return `${Math.round(s / 3600)}h ago`;
+  return `${Math.round(s / 86400)}d ago`;
+};
+function CloudIndicator({
+  sync,
+  onOpen
+}) {
+  const st = sync.status.state;
+  const look = {
+    off: [COLORS.textDim, "☁ Sync off"],
+    idle: [COLORS.textDim, "☁ Sync ready"],
+    syncing: [COLORS.steel, "↻ Syncing…"],
+    ok: [COLORS.sage, `☁ Synced ${timeAgo(sync.status.at)}`],
+    retry: [COLORS.gold, "☁ Will retry"],
+    error: [COLORS.rust, "⚠ Sync paused"],
+    choice: [COLORS.gold, "☁ Choose sync copy"],
+    outdated: [COLORS.gold, "⚠ Update this device"]
+  }[st] || [COLORS.textDim, "☁ Sync"];
+  return h("button", {
+    onClick: onOpen,
+    title: sync.status.message || (st === "off" ? "Sync this ledger between your Mac and iPhone" : "Sync settings"),
+    style: {
+      background: "transparent",
+      border: `1px solid ${look[0]}55`,
+      color: look[0],
+      borderRadius: 20,
+      padding: "5px 11px",
+      fontSize: 11.5,
+      cursor: "pointer",
+      whiteSpace: "nowrap"
+    }
+  }, look[1]);
+}
+function CloudSyncPanel({
+  sync
+}) {
+  const c = sync.cfg || {};
+  const [owner, setOwner] = useState(c.owner || "");
+  const [repo, setRepo] = useState(c.repo || "ledger-data");
+  const [token, setToken] = useState(c.token || "");
+  const [deviceName, setDeviceName] = useState(c.deviceName || guessDeviceName());
+  const [path, setPath] = useState(c.path || "ledger-sync.json");
+  const [branch, setBranch] = useState(c.branch || "main");
+  const [advanced, setAdvanced] = useState(false);
+  const [working, setWorking] = useState(false);
+  const connected = cloudReady(sync.cfg);
+  const st = sync.status;
+  const step = (n, body) => h("div", {
+    style: {
+      display: "flex",
+      gap: 10,
+      fontSize: 12.5,
+      color: COLORS.textDim,
+      lineHeight: 1.55
+    }
+  }, h("span", {
+    style: {
+      ...plMono,
+      color: COLORS.gold,
+      flexShrink: 0
+    }
+  }, n), h("div", null, body));
+  const link = (href, text) => h("a", {
+    href,
+    target: "_blank",
+    rel: "noopener noreferrer",
+    style: {
+      color: COLORS.steel
+    }
+  }, text);
+  const go = async () => {
+    setWorking(true);
+    await sync.connect({
+      owner,
+      repo,
+      token,
+      deviceName: deviceName.trim() || guessDeviceName(),
+      path: path.trim() || "ledger-sync.json",
+      branch: branch.trim() || "main"
+    });
+    setWorking(false);
+  };
+  return h("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 14
+    }
+  }, h("div", {
+    style: {
+      fontSize: 13,
+      color: COLORS.textDim,
+      lineHeight: 1.6
+    }
+  }, "Keeps this ledger identical on your Mac and iPhone through a ", h("b", {
+    style: {
+      color: COLORS.text
+    }
+  }, "private"), " GitHub repo you own. Each device works offline from its own copy and syncs when it opens, when you switch back to it, and a few seconds after any change. Every sync is a commit, so the repo doubles as a full history of your data."), typeof navigator !== "undefined" && navigator.standalone === false && h("div", {
+    style: {
+      fontSize: 12.5,
+      color: COLORS.textDim,
+      lineHeight: 1.55,
+      background: `${COLORS.gold}12`,
+      border: `1px solid ${COLORS.gold}44`,
+      borderRadius: 8,
+      padding: "9px 11px"
+    }
+  }, h("b", {
+    style: {
+      color: COLORS.gold
+    }
+  }, "On iPhone, add Ledger to your Home Screen first. "), "Tap Share → ", h("i", null, "Add to Home Screen"), ", then open it from there and connect sync inside that copy. It runs full-screen like an app, and iOS keeps its data — a Safari tab can have its storage cleared after a week without a visit. (The Home Screen copy has its own separate storage, which is why sync should be set up there rather than here.)"), st.message && h("div", {
+    style: {
+      fontSize: 12.5,
+      color: st.state === "error" ? COLORS.rust : st.state === "ok" ? COLORS.sage : COLORS.gold,
+      background: COLORS.bg,
+      border: `1px solid ${COLORS.line}`,
+      borderRadius: 8,
+      padding: "8px 10px"
+    }
+  }, st.message), connected && h("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 10,
+      flexWrap: "wrap",
+      fontSize: 12.5,
+      color: COLORS.textDim
+    }
+  }, h("span", {
+    style: {
+      flex: 1
+    }
+  }, "Connected to ", h("span", {
+    style: {
+      ...plMono,
+      color: COLORS.text
+    }
+  }, sync.cfg.owner, "/", sync.cfg.repo), " as ", h("b", {
+    style: {
+      color: COLORS.text
+    }
+  }, sync.cfg.deviceName || guessDeviceName()), st.at ? ` · last synced ${timeAgo(st.at)}` : ""), h(GhostButton, {
+    onClick: () => sync.syncNow(),
+    style: {
+      padding: "5px 10px",
+      fontSize: 12
+    }
+  }, "Sync now"), h(GhostButton, {
+    onClick: () => {
+      if (window.confirm("Stop syncing on this device? Your data here stays; the token is removed from this device.")) sync.disconnect();
+    },
+    style: {
+      padding: "5px 10px",
+      fontSize: 12,
+      color: COLORS.rust,
+      borderColor: `${COLORS.rust}55`
+    }
+  }, "Disconnect")), !connected && h("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 8,
+      background: COLORS.bg,
+      border: `1px solid ${COLORS.line}`,
+      borderRadius: 10,
+      padding: 12
+    }
+  }, h("div", {
+    style: {
+      ...plLabel,
+      marginBottom: 2
+    }
+  }, "ONE-TIME SETUP (ABOUT 3 MINUTES)"), step("1", h("span", null, link("https://github.com/new", "Create a new repository"), " named ", h("span", {
+    style: {
+      ...plMono,
+      color: COLORS.text
+    }
+  }, "ledger-data"), ". Set it to ", h("b", {
+    style: {
+      color: COLORS.text
+    }
+  }, "Private"), " and tick ", h("i", null, "Add a README"), ". (Not your GitHub Pages repo — that one is public.)")), step("2", h("span", null, link("https://github.com/settings/personal-access-tokens/new", "Create a fine-grained token"), ": Repository access → ", h("i", null, "Only select repositories"), " → ledger-data. Permissions → Repository → ", h("b", {
+    style: {
+      color: COLORS.text
+    }
+  }, "Contents: Read and write"), ". Pick an expiration (a year is fine — sync tells you when it lapses).")), step("3", "Paste it below and connect. On your iPhone, open Ledger, tap ☁, and do the same — copy the token on your Mac and paste on the phone (Universal Clipboard), or make a second token.")), h("div", {
+    style: {
+      display: "flex",
+      gap: 10,
+      flexWrap: "wrap",
+      alignItems: "flex-end"
+    }
+  }, h(Field, {
+    label: "GitHub username"
+  }, h("input", {
+    value: owner,
+    onChange: e => setOwner(e.target.value),
+    placeholder: "your-username",
+    autoCapitalize: "off",
+    autoCorrect: "off",
+    spellCheck: false,
+    style: inputStyle
+  })), h(Field, {
+    label: "Private repo"
+  }, h("input", {
+    value: repo,
+    onChange: e => setRepo(e.target.value),
+    autoCapitalize: "off",
+    autoCorrect: "off",
+    spellCheck: false,
+    style: inputStyle
+  })), h(Field, {
+    label: "This device is"
+  }, h("input", {
+    value: deviceName,
+    onChange: e => setDeviceName(e.target.value),
+    style: inputStyle
+  }))), h(Field, {
+    label: connected ? "Token (saved — paste a new one to replace)" : "Token"
+  }, h("input", {
+    type: "password",
+    value: token,
+    onChange: e => setToken(e.target.value),
+    placeholder: "github_pat_…",
+    autoCapitalize: "off",
+    autoCorrect: "off",
+    spellCheck: false,
+    style: inputStyle
+  })), h("button", {
+    type: "button",
+    onClick: () => setAdvanced(a => !a),
+    style: {
+      alignSelf: "flex-start",
+      background: "transparent",
+      border: "none",
+      color: COLORS.textDim,
+      fontSize: 12,
+      cursor: "pointer",
+      padding: 0,
+      textDecoration: "underline",
+      textUnderlineOffset: 2
+    }
+  }, advanced ? "− fewer options" : "+ file name / branch"), advanced && h("div", {
+    style: {
+      display: "flex",
+      gap: 10,
+      flexWrap: "wrap"
+    }
+  }, h(Field, {
+    label: "File in repo"
+  }, h("input", {
+    value: path,
+    onChange: e => setPath(e.target.value),
+    style: inputStyle
+  })), h(Field, {
+    label: "Branch"
+  }, h("input", {
+    value: branch,
+    onChange: e => setBranch(e.target.value),
+    style: inputStyle
+  }))), h("div", {
+    style: {
+      fontSize: 11.5,
+      color: COLORS.textDim,
+      lineHeight: 1.5
+    }
+  }, "The token is stored only in this browser on this device, and is sent only to api.github.com. Ledger refuses to sync to a public repo."), h("div", {
+    style: {
+      display: "flex",
+      justifyContent: "flex-end"
+    }
+  }, h(PrimaryButton, {
+    onClick: go,
+    style: {
+      opacity: owner.trim() && repo.trim() && token.trim() && !working ? 1 : .45
+    }
+  }, working ? "Connecting…" : connected ? "Save & sync" : "Connect & sync")));
+}
+function CloudJoinChoice({
+  join,
+  onChoose
+}) {
+  const opt = (key, title, body, primary) => h("button", {
+    key,
+    onClick: () => onChoose(key),
+    style: {
+      textAlign: "left",
+      background: primary ? `${COLORS.gold}14` : COLORS.bg,
+      border: `1px solid ${primary ? `${COLORS.gold}66` : COLORS.line}`,
+      borderRadius: 10,
+      padding: "11px 13px",
+      cursor: "pointer",
+      color: COLORS.text
+    }
+  }, h("div", {
+    style: {
+      fontSize: 13.5,
+      marginBottom: 3
+    }
+  }, title), h("div", {
+    style: {
+      fontSize: 12,
+      color: COLORS.textDim,
+      lineHeight: 1.5
+    }
+  }, body));
+  return h("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      gap: 10
+    }
+  }, h("div", {
+    style: {
+      fontSize: 13,
+      color: COLORS.textDim,
+      lineHeight: 1.6
+    }
+  }, "This device and the synced copy both have data, and they're different. The synced copy has ", h("b", {
+    style: {
+      color: COLORS.text
+    }
+  }, join.remoteCount, " entries"), join.remoteBy ? ` (last saved by ${join.remoteBy}${join.remoteAt ? `, ${timeAgo(join.remoteAt)}` : ""})` : "", "; this device has ", h("b", {
+    style: {
+      color: COLORS.text
+    }
+  }, join.localCount), ". Which should win?"), opt("remote", "Use the synced copy", "Replace this device's data with it. Best when your other device is the one you've been keeping up to date.", true), opt("combine", "Combine both", "Keep everything from both. Nothing is deleted — but anything typed separately on both devices will show up twice."), opt("local", "Use this device's data", "Overwrite the synced copy with what's here. (Earlier versions stay in the repo's history.)"));
+}
+
 /* ==================== MAIN APP ==================== */
 function Ledger() {
   const [transactions, setTransactions] = useState([]);
@@ -4750,6 +8675,8 @@ function Ledger() {
   const [recurring, setRecurring] = useState([]);
   const [dueRecurring, setDueRecurring] = useState([]);
   const [planned, setPlanned] = useState([]);
+  const [planner, setPlannerState] = useState(DEFAULT_PLANNER);
+  const [confirmingPay, setConfirmingPay] = useState(null);
   const [projected, setProjected] = useState([]);
   const [importRules, setImportRules] = useState([]);
   const [lastBackup, setLastBackup] = useState("");
@@ -4811,6 +8738,7 @@ function Ledger() {
     setRecurring(loadedRecurring);
     setPlanned(loadedPlanned);
     setProjected(loadedProjected);
+    setPlannerState(loadPlanner());
     setImportRules(loadImportRules());
     setLastBackup(loadLastBackup());
     const today = todayISO();
@@ -4827,6 +8755,15 @@ function Ledger() {
   const persistAccounts = useCallback(list => {
     setAccounts(list);
     saveAccounts(list);
+  }, []);
+  /* Functional like `persist`: planner edits come in quick taps (toggle worked,
+     drag through months) and must never clobber each other. */
+  const persistPlanner = useCallback(updater => {
+    setPlannerState(prev => {
+      const next = normalizePlanner(typeof updater === "function" ? updater(prev) : updater);
+      savePlanner(next);
+      return next;
+    });
   }, []);
   const persistCategories = useCallback(list => {
     CATEGORY_LIB = list;
@@ -4987,8 +8924,31 @@ function Ledger() {
     link: t.link || "",
     notes: t.notes || ""
   })), [transactions]);
-  const projectedAll = useMemo(() => [...projected, ...owedBackRows], [projected, owedBackRows]);
+  const todayStr = todayISO();
+  const plannerPaychecks = useMemo(() => computePaychecks(planner, {
+    today: todayStr
+  }), [planner, todayStr]);
+  /* Paychecks are derived from shifts, so these rows are read-only here: edit
+     the shifts in the Planner, and "Received" opens the confirm flow. */
+  const plannerRows = useMemo(() => plannerPaychecks.map(pc => ({
+    id: pc.id,
+    fromPlanner: true,
+    plannerPayId: pc.id,
+    source: `${pc.jobName} pay · ${plFmtRange(pc.periodStart, pc.periodEnd)}`,
+    gross: pc.gross,
+    withholdingRate: pc.withholdingPct,
+    estAmount: pc.net,
+    expectedDate: pc.payDate,
+    confidence: pc.confidence,
+    category: pc.category,
+    account: pc.account,
+    color: pc.color,
+    link: "",
+    notes: ""
+  })), [plannerPaychecks]);
+  const projectedAll = useMemo(() => [...projected, ...owedBackRows, ...plannerRows], [projected, owedBackRows, plannerRows]);
   const updateProjected = item => {
+    if (item.fromPlanner) return;
     if (item.sourceTxId) {
       persist(prev => prev.map(t => t.id === item.sourceTxId ? {
         ...t,
@@ -5001,6 +8961,7 @@ function Ledger() {
     persistProjected(projected.map(p => p.id === item.id ? item : p));
   };
   const deleteProjected = id => {
+    if (String(id).startsWith("pay:")) return;
     if (String(id).startsWith("owed-")) {
       const txId = String(id).slice(6);
       persist(prev => prev.map(t => t.id === txId ? {
@@ -5013,6 +8974,11 @@ function Ledger() {
     persistProjected(projected.filter(p => p.id !== id));
   };
   const markProjectedReceived = item => {
+    if (item.fromPlanner) {
+      const pc = plannerPaychecks.find(p => p.id === item.plannerPayId);
+      if (pc) setConfirmingPay(pc);
+      return;
+    }
     const amt = Math.abs(Number(item.estAmount));
     /* If this inflow came from an expense you were owed back for, receiving it
        settles that expense's reimbursement rather than creating fresh income. */
@@ -5089,7 +9055,7 @@ function Ledger() {
     setDueRecurring([]);
   };
   const now = new Date();
-  const thisMonth = now.toISOString().slice(0, 7);
+  const thisMonth = todayISO().slice(0, 7);
   const thisYear = String(now.getFullYear());
   const periodFiltered = useMemo(() => {
     if (period === "month") return transactions.filter(t => monthKey(t.date) === thisMonth);
@@ -5530,6 +9496,208 @@ function Ledger() {
       undatedIncome
     };
   }, [accountBalances, projectedAll, planned, recurring]);
+  const suggestedBaseline = useMemo(() => suggestBaselineMonthly(transactions, todayStr), [transactions, todayStr]);
+  const baselineMonthly = planner.settings.baselineMonthly !== null && planner.settings.baselineMonthly !== undefined && planner.settings.baselineMonthly !== "" ? Number(planner.settings.baselineMonthly) || 0 : suggestedBaseline;
+  /* The reservoir starts from money you can actually spend, net of card debt. */
+  const reservoirStartCash = useMemo(() => Math.round((accountBalances.filter(isSpendableAccount).reduce((s, a) => s + a.balance, 0) - accountBalances.filter(isCreditAccount).reduce((s, a) => s + a.owed, 0)) * 100) / 100, [accountBalances]);
+  const otherInflows = useMemo(() => [...projected, ...owedBackRows].filter(r => r.expectedDate && Number(r.estAmount) > 0).map(r => ({
+    date: r.expectedDate,
+    amount: Number(r.estAmount) * (CONFIDENCE_WEIGHT[r.confidence] ?? 1),
+    full: Number(r.estAmount),
+    label: r.source
+  })), [projected, owedBackRows]);
+  /* Shared by the dashboard and the Planner's what-if, so a scenario is judged
+     by exactly the same rules as the real schedule. */
+  const computeReservoirFor = useCallback(pcs => {
+    const inflows = [...pcs.map(p => ({
+      date: p.payDate,
+      amount: p.net * (CONFIDENCE_WEIGHT[p.confidence] ?? 1),
+      label: p.jobName
+    })), ...otherInflows];
+    let fixedMonthly = 0;
+    const horizonEnd = plAddDays(todayStr, 365);
+    recurring.forEach(r => {
+      const amt = Number(r.amount) || 0;
+      if (r.type === "income") {
+        let cur = r.nextDate,
+          g = 0;
+        while (cur && cur <= horizonEnd && g < 400) {
+          if (cur >= todayStr) inflows.push({
+            date: cur,
+            amount: amt,
+            label: r.description
+          });
+          cur = advanceDate(cur, r.frequency);
+          g++;
+        }
+      } else fixedMonthly += r.frequency === "weekly" ? amt * 52 / 12 : r.frequency === "yearly" ? amt / 12 : amt;
+    });
+    const outflows = planned.filter(p => p.targetDate).map(p => ({
+      date: p.targetDate,
+      amount: Number(p.estCost) || 0
+    }));
+    const st = planner.settings;
+    const safe = safeMonthlySpend({
+      today: todayStr,
+      startCash: reservoirStartCash,
+      inflows,
+      fixedMonthly,
+      outflows,
+      cushion: Number(st.bufferMin) || 0
+    });
+    const g = incomeGaps({
+      today: todayStr,
+      startCash: reservoirStartCash,
+      inflows,
+      baselineMonthly,
+      gapDays: Number(st.gapDays) || 21,
+      outflows
+    });
+    return {
+      safe,
+      gaps: g.gaps,
+      runway: g.runway,
+      fixedMonthly: Math.round(fixedMonthly * 100) / 100
+    };
+  }, [otherInflows, recurring, planned, planner.settings, reservoirStartCash, baselineMonthly, todayStr]);
+  const reservoir = useMemo(() => computeReservoirFor(plannerPaychecks), [computeReservoirFor, plannerPaychecks]);
+  const plannerAlert = useMemo(() => {
+    if (!planner.jobs.length) return null;
+    const soon = plAddDays(todayStr, 90);
+    const gap = reservoir.gaps.find(g => g.shortfall > 0 && g.from <= soon);
+    if (gap) return {
+      kind: "gap",
+      gap
+    };
+    if (reservoir.runway && reservoir.runway.daysLeft < 45 && reservoir.runway.runsOut <= soon) return {
+      kind: "runway",
+      runway: reservoir.runway
+    };
+    return null;
+  }, [planner.jobs.length, reservoir, todayStr]);
+  const expectedSoonByAccount = useMemo(() => {
+    const lim = plAddDays(todayStr, 30);
+    const out = {};
+    projectedAll.forEach(r => {
+      if (!r.expectedDate || r.expectedDate > lim || !r.account) return;
+      out[r.account] = Math.round(((out[r.account] || 0) + Number(r.estAmount || 0)) * 100) / 100;
+    });
+    return out;
+  }, [projectedAll, todayStr]);
+  const txIds = useMemo(() => new Set(transactions.map(t => t.id)), [transactions]);
+  /* ---- cloud sync wiring ---- */
+  const syncDataRef = useRef(null);
+  syncDataRef.current = {
+    transactions,
+    accounts,
+    categories,
+    budgets,
+    budgetSettings,
+    recurring,
+    planned,
+    projected,
+    importRules,
+    planner
+  };
+  const getSyncData = useCallback(() => syncDataRef.current, []);
+  const applySyncData = useCallback(d => {
+    if (Array.isArray(d.transactions)) persist(d.transactions);
+    if (Array.isArray(d.accounts) && d.accounts.length) persistAccounts(d.accounts);
+    if (Array.isArray(d.categories) && d.categories.length) persistCategories(d.categories);
+    if (d.budgets && typeof d.budgets === "object") persistBudgets(d.budgets);
+    if (d.budgetSettings) persistBudgetSettings({
+      ...DEFAULT_BUDGET_SETTINGS,
+      ...d.budgetSettings,
+      perCategory: d.budgetSettings.perCategory || {}
+    });
+    if (Array.isArray(d.recurring)) persistRecurring(d.recurring);
+    if (Array.isArray(d.planned)) persistPlanned(d.planned);
+    if (Array.isArray(d.projected)) persistProjected(d.projected);
+    if (Array.isArray(d.importRules)) persistImportRules(d.importRules);
+    if (d.planner) persistPlanner(d.planner);
+  }, []);
+  /* a fresh identity whenever any synced data changes */
+  const syncChangeKey = useMemo(() => ({}), [transactions, accounts, categories, budgets, budgetSettings, recurring, planned, projected, importRules, planner]);
+  const cloud = useCloudSync({
+    loaded,
+    getData: getSyncData,
+    applyData: applySyncData,
+    changeKey: syncChangeKey
+  });
+  const [showCloud, setShowCloud] = useState(false);
+  const cloudIndicator = h(CloudIndicator, {
+    sync: cloud,
+    onOpen: () => setShowCloud(true)
+  });
+  /* Confirming a paycheck: a real income entry for the ACTUAL amount, the
+     period's shifts marked paid (per period, so a session spanning two
+     paychecks stays half-unpaid), and a record of expected vs. actual. */
+  const confirmPaycheck = (pc, {
+    actual,
+    date,
+    account
+  }) => {
+    const recId = uid(),
+      txId = uid();
+    persist(prev => [{
+      id: txId,
+      date,
+      description: `${pc.jobName} pay (${plFmtRange(pc.periodStart, pc.periodEnd)})`,
+      amount: actual,
+      type: "income",
+      category: pc.category || "Income",
+      account,
+      isDeduction: false,
+      notes: "from Planner",
+      plannerRecordId: recId
+    }, ...prev]);
+    persistPlanner(prev => {
+      const job = prev.jobs.find(j => j.id === pc.jobId);
+      const jobShifts = prev.shifts.filter(s => s.jobId === pc.jobId);
+      const shifts = prev.shifts.map(s => {
+        if (!pc.shiftIds.includes(s.id)) return s;
+        const paidKeys = [...new Set([...(s.paidKeys || []), pc.id])];
+        const all = shiftPeriodIds(s, job, jobShifts);
+        const fully = all.length > 0 && all.every(id => paidKeys.includes(id));
+        return {
+          ...s,
+          paidKeys,
+          state: fully ? "paid" : s.state === "scheduled" && s.date <= pc.periodEnd ? "worked" : s.state
+        };
+      });
+      return {
+        ...prev,
+        shifts,
+        payRecords: [{
+          id: recId,
+          jobId: pc.jobId,
+          payId: pc.id,
+          periodStart: pc.periodStart,
+          periodEnd: pc.periodEnd,
+          expectedDate: pc.payDate,
+          receivedDate: date,
+          expected: pc.net,
+          actual,
+          txId,
+          shiftIds: pc.shiftIds
+        }, ...prev.payRecords]
+      };
+    });
+    setConfirmingPay(null);
+    setNotice(`Recorded ${fmtMoney(actual)} from ${pc.jobName}.`);
+  };
+  const undoPayRecord = rec => {
+    persist(prev => prev.filter(t => t.id !== rec.txId));
+    persistPlanner(prev => ({
+      ...prev,
+      shifts: prev.shifts.map(s => (rec.shiftIds || []).includes(s.id) ? {
+        ...s,
+        paidKeys: (s.paidKeys || []).filter(k => k !== rec.payId),
+        state: s.state === "paid" ? "worked" : s.state
+      } : s),
+      payRecords: prev.payRecords.filter(r => r.id !== rec.id)
+    }));
+  };
   const exportCSV = () => {
     const rows = [["date", "description", "type", "category", "account", "amount", "reimbursed", "net", "deductible", "notes"]];
     transactions.forEach(t => {
@@ -5598,7 +9766,7 @@ function Ledger() {
   };
   const buildBackupPayload = useCallback(() => ({
     app: "ledger",
-    version: 5,
+    version: 6,
     exportedAt: new Date().toISOString(),
     transactions,
     accounts,
@@ -5608,8 +9776,9 @@ function Ledger() {
     recurring,
     planned,
     projected,
-    importRules
-  }), [transactions, accounts, categories, budgets, budgetSettings, recurring, planned, projected, importRules]);
+    importRules,
+    planner
+  }), [transactions, accounts, categories, budgets, budgetSettings, recurring, planned, projected, importRules, planner]);
   const backupJSON = () => {
     const payload = buildBackupPayload();
     const blob = new Blob([JSON.stringify(payload, null, 2)], {
@@ -5678,7 +9847,7 @@ function Ledger() {
       })));
     }, 1200);
     return () => clearTimeout(syncTimerRef.current);
-  }, [transactions, accounts, categories, budgets, recurring, planned, projected, importRules, syncState.status, loaded, writeSyncFile]);
+  }, [transactions, accounts, categories, budgets, recurring, planned, projected, importRules, planner, syncState.status, loaded, writeSyncFile]);
   const linkSyncFile = async () => {
     if (!fsSupported()) return;
     try {
@@ -5770,6 +9939,7 @@ function Ledger() {
         const incomingProjected = Array.isArray(parsed?.projected) ? parsed.projected : null;
         const incomingBudgetSettings = parsed && parsed.budgetSettings && typeof parsed.budgetSettings === "object" ? parsed.budgetSettings : null;
         const incomingRules = Array.isArray(parsed?.importRules) ? parsed.importRules : null;
+        const incomingPlanner = parsed && parsed.planner && typeof parsed.planner === "object" ? normalizePlanner(parsed.planner) : null;
         if (!Array.isArray(incoming)) {
           alert("That file doesn't look like a Ledger backup.");
           return;
@@ -5812,6 +9982,18 @@ function Ledger() {
             const existingRuleKeys = new Set(importRules.map(r => `${r.match}|${r.category}`));
             persistImportRules([...importRules, ...incomingRules.filter(r => !existingRuleKeys.has(`${r.match}|${r.category}`))]);
           }
+          if (incomingPlanner) persistPlanner(prev => {
+            const union = (a, b) => {
+              const ids = new Set(a.map(x => x.id));
+              return [...a, ...b.filter(x => !ids.has(x.id))];
+            };
+            return {
+              ...prev,
+              jobs: union(prev.jobs, incomingPlanner.jobs),
+              shifts: union(prev.shifts, incomingPlanner.shifts),
+              payRecords: union(prev.payRecords, incomingPlanner.payRecords)
+            };
+          });
           const added = incoming.filter(t => !existingIds.has(t.id)).length;
           setNotice(added === 0 ? `That backup's ${incoming.length} entries were already here — nothing new to add.` : `Merged in ${added} new ${added === 1 ? "entry" : "entries"}.`);
         } else {
@@ -5828,6 +10010,7 @@ function Ledger() {
           if (incomingPlanned) persistPlanned(incomingPlanned);
           if (incomingProjected) persistProjected(incomingProjected);
           if (incomingRules) persistImportRules(incomingRules);
+          if (incomingPlanner) persistPlanner(incomingPlanner);
           setNotice(`Restored ${incoming.length} ${incoming.length === 1 ? "entry" : "entries"}${incomingAccounts ? ` and ${incomingAccounts.length} accounts` : ""}.`);
         }
         resetFilters();
@@ -5877,7 +10060,8 @@ function Ledger() {
       minHeight: "100vh",
       fontFamily: "'Inter', sans-serif",
       padding: "26px 26px 60px"
-    }
+    },
+    className: "ldg-root"
   }, /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -5916,7 +10100,21 @@ function Ledger() {
       borderBottom: `2px solid ${totals.net >= 0 ? COLORS.sage : COLORS.rust}66`,
       paddingBottom: 2
     }
-  }, fmtMoney(totals.net)))), /*#__PURE__*/React.createElement("div", {
+  }, fmtMoney(totals.net))), h("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 10,
+      marginTop: 12,
+      flexWrap: "wrap"
+    }
+  }, h(Segmented, {
+    value: viewPrefs.tab === "planner" ? "planner" : "ledger",
+    onChange: v => patchViewPrefs({
+      tab: v
+    }),
+    options: [["ledger", "Ledger"], ["planner", "Shift & Season Planner"]]
+  }), cloudIndicator)), viewPrefs.tab !== "planner" && /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       gap: 8,
@@ -6058,7 +10256,35 @@ function Ledger() {
       padding: "4px 9px",
       fontSize: 11
     }
-  }, "Dismiss")), (backupStale || syncState.status === "needs-permission" || syncState.status === "on") && /*#__PURE__*/React.createElement("div", {
+  }, "Dismiss")), viewPrefs.tab !== "planner" && plannerAlert && h("div", {
+    style: {
+      maxWidth: 1100,
+      margin: "0 auto 18px",
+      display: "flex",
+      alignItems: "center",
+      gap: 12,
+      flexWrap: "wrap",
+      background: `${COLORS.rust}14`,
+      border: `1px solid ${COLORS.rust}55`,
+      borderRadius: 10,
+      padding: "10px 14px"
+    }
+  }, h("div", {
+    style: {
+      fontSize: 13,
+      color: COLORS.text,
+      flex: 1,
+      lineHeight: 1.5
+    }
+  }, plannerAlert.kind === "gap" ? `Income gap ahead: nothing comes in between ${plShortDate(plannerAlert.gap.from)} and ${plShortDate(plannerAlert.gap.to)} (${plannerAlert.gap.days} days). At your usual spending you'll be about ${fmtMoney(plannerAlert.gap.shortfall)} short.` : `Scheduled income ends ${plannerAlert.runway.lastIncome ? plShortDate(plannerAlert.runway.lastIncome) : "now"}; at your usual spending savings run out around ${plShortDate(plannerAlert.runway.runsOut)}.`), h(GhostButton, {
+    onClick: () => patchViewPrefs({
+      tab: "planner"
+    }),
+    style: {
+      padding: "5px 10px",
+      fontSize: 12
+    }
+  }, "Open Planner")), (backupStale || syncState.status === "needs-permission" || syncState.status === "on") && /*#__PURE__*/React.createElement("div", {
     style: {
       maxWidth: 1100,
       margin: "0 auto 18px",
@@ -6107,7 +10333,28 @@ function Ledger() {
       padding: "6px 12px",
       fontSize: 12
     }
-  }, "Back up now")), /*#__PURE__*/React.createElement("div", {
+  }, "Back up now")), viewPrefs.tab === "planner" ? h("div", {
+    style: {
+      maxWidth: 1100,
+      margin: "0 auto"
+    }
+  }, h(PlannerView, {
+    planner,
+    setPlanner: persistPlanner,
+    accounts,
+    categories,
+    transactions,
+    paychecks: plannerPaychecks,
+    reservoir,
+    baselineMonthly,
+    suggestedBaseline,
+    otherInflows,
+    computeReservoirFor,
+    txIds,
+    onConfirm: pc => setConfirmingPay(pc),
+    onUndo: undoPayRecord,
+    today: todayStr
+  })) : /*#__PURE__*/React.createElement("div", {
     style: {
       maxWidth: 1100,
       margin: "0 auto"
@@ -6218,6 +10465,17 @@ function Ledger() {
     accent: COLORS.sage,
     sub: `${projectedAll.length} inflow${projectedAll.length === 1 ? "" : "s"} expected`,
     onClick: () => setShowProjected(true)
+  }), planner.jobs.length > 0 && /*#__PURE__*/React.createElement(SummaryCard, {
+    label: "Safe to spend",
+    value: `${fmtMoney(reservoir.safe.perMonth)}/mo`,
+    icon: /*#__PURE__*/React.createElement(IconTarget, {
+      size: 17
+    }),
+    accent: reservoir.safe.perMonth < 0 ? COLORS.rust : COLORS.sage,
+    sub: reservoir.safe.perMonth < 0 ? `scheduled pay arrives too late — tight around ${plShortDate(reservoir.safe.bindingDate)}` : `for the next year, given when pay lands`,
+    onClick: () => patchViewPrefs({
+      tab: "planner"
+    })
   }), creditSummary && /*#__PURE__*/React.createElement(SummaryCard, {
     label: "True position",
     value: fmtMoney(creditSummary.truePosition),
@@ -6321,7 +10579,13 @@ function Ledger() {
         fontSize: 10.5,
         color: dueIn <= 3 && a.owed > 0 ? COLORS.rust : COLORS.textDim
       }
-    }, a.owed > 0 ? `${fmtMoney(a.owed)} due ${dueIn === 0 ? "today" : dueIn === 1 ? "tomorrow" : `in ${dueIn} days`}` : `Nothing due · next ${dueIn === 0 ? "today" : `in ${dueIn} days`}`));
+    }, a.owed > 0 ? `${fmtMoney(a.owed)} due ${dueIn === 0 ? "today" : dueIn === 1 ? "tomorrow" : `in ${dueIn} days`}` : `Nothing due · next ${dueIn === 0 ? "today" : `in ${dueIn} days`}`), (expectedSoonByAccount[a.id] || 0) > 0 && h("div", {
+      title: "Expected income landing here in the next 30 days (Expected income + Planner paychecks)",
+      style: {
+        fontSize: 10.5,
+        color: COLORS.sage
+      }
+    }, "+", fmtMoney(expectedSoonByAccount[a.id]), " expected in 30 days"));
   })), /*#__PURE__*/React.createElement(SpareChangeWidget, {
     accounts: assetAccounts,
     account: changeAccount,
@@ -7084,6 +11348,29 @@ function Ledger() {
     onUpdate: updateProjected,
     onDelete: deleteProjected,
     onMarkReceived: markProjectedReceived
+  })), showCloud && h(Modal, {
+    title: "Sync between your devices",
+    onClose: () => setShowCloud(false),
+    wide: true
+  }, h(CloudSyncPanel, {
+    sync: cloud
+  })), cloud.join && h(Modal, {
+    title: "Which data should this device use?",
+    onClose: () => {}
+  }, h(CloudJoinChoice, {
+    join: cloud.join,
+    onChoose: choice => {
+      if (choice === "local" && !window.confirm("Overwrite the synced copy with this device's data? Your other device will receive this version.")) return;
+      cloud.resolveJoin(choice);
+    }
+  })), confirmingPay && h(Modal, {
+    title: "Paycheck received",
+    onClose: () => setConfirmingPay(null)
+  }, h(ConfirmPaycheckForm, {
+    paycheck: confirmingPay,
+    accounts,
+    onConfirm: vals => confirmPaycheck(confirmingPay, vals),
+    onCancel: () => setConfirmingPay(null)
   })));
 }
 ReactDOM.createRoot(document.getElementById("root")).render(/*#__PURE__*/React.createElement(Ledger, null));
